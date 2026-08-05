@@ -1,7 +1,3 @@
-pandas
-python-docx
-Pillow
-requests
-docxtpl
-plotly
-google-generativeai
+streamlit==1.38.0
+requests==2.31.0
+pandas==2.2.0

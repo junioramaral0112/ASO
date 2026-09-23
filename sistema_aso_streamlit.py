@@ -10,6 +10,8 @@ import os
 from PIL import Image
 import base64
 import json
+import unicodedata
+from urllib.parse import unquote
 
 # =========================================================
 # CONFIGURAÇÃO DE CAMINHOS E PERSISTÊNCIA LOCAL (JSON)
@@ -54,6 +56,12 @@ def carregar_imagem_base64(path):
         with open(path, "rb") as img_file:
             return base64.b64encode(img_file.read()).decode()
     return None
+
+def normalizar_texto(texto):
+    if not isinstance(texto, str):
+        return ""
+    texto = unicodedata.normalize("NFKD", texto).encode("ASCII", "ignore").decode("ASCII")
+    return texto.strip().upper()
 
 # =========================================================
 # CONFIGURAÇÃO DA PÁGINA
@@ -127,7 +135,7 @@ UNIDADES = {
 SHEET_ID_GLOBAL = "1y98U3eK7JXJqQaMC0i7eFbwpvp97Nuyeml5Dis0UCUg"
 GID_COLABORADORES = "595994340"
 
-@st.cache_data(ttl=60) # Ajustado para 1 minuto para atualizar rápido
+@st.cache_data(ttl=60)
 def load_data(gid):
     url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={gid}"
     df = pd.read_csv(url)
@@ -188,7 +196,7 @@ try:
     # 2. Carrega dados da Planilha 1
     df = load_data(UNIDADES[aba_nome])
     
-    # 3. Carrega dados da Planilha 2
+    # 3. Carrega dados da Planilha 2 (Global de Colaboradores)
     url_global = f"https://docs.google.com/spreadsheets/d/{SHEET_ID_GLOBAL}/export?format=csv&gid={GID_COLABORADORES}"
     df_global_raw = pd.read_csv(url_global, header=None)
     
@@ -207,13 +215,30 @@ try:
                           (df_global["Nome"] != "")]
 
     # ---------------------------------------------------------
-    # SEÇÃO: BUSCA ATIVA GLOBAL
+    # SEÇÃO: BUSCA ATIVA GLOBAL COM LEITURA DA URL
     # ---------------------------------------------------------
     st.markdown("### 🔍 Busca Ativa e Emissão de Guia Avulsa")
     
-    # Limpeza e ordenação estrita de strings para evitar erro de tipo float vs str
     lista_nomes = sorted([nome for nome in df_global["Nome"].unique() if isinstance(nome, str) and nome.strip() != ""])
-    nome_selecionado = st.selectbox("Digite ou selecione o nome do colaborador:", [""] + lista_nomes, index=0)
+    opcoes_com_vazio = [""] + lista_nomes
+    
+    # Captura da URL ?colaborador=...
+    param_colaborador = st.query_params.get("colaborador", None)
+    idx_busca_padrao = 0
+
+    if param_colaborador:
+        nome_url_norm = normalizar_texto(unquote(str(param_colaborador)))
+        for i, nome_opcao in enumerate(opcoes_com_vazio):
+            if nome_opcao != "":
+                if normalizar_texto(nome_opcao) == nome_url_norm or nome_url_norm in normalizar_texto(nome_opcao):
+                    idx_busca_padrao = i
+                    break
+
+    nome_selecionado = st.selectbox(
+        "Digite ou selecione o nome do colaborador:",
+        opcoes_com_vazio,
+        index=idx_busca_padrao
+    )
 
     if nome_selecionado != "":
         dados_colaborador = df_global[df_global["Nome"] == nome_selecionado].iloc[0]
@@ -235,7 +260,6 @@ try:
         with c_busca2: dt_s_busca = st.date_input("Data sugerida (Avulso)", value=datetime.now() + timedelta(days=2), key="data_busca")
         with c_busca3:
             st.markdown("<br>", unsafe_allow_html=True)
-            # KEY baseada no nome do funcionário evita bugs de cache do Streamlit
             foi_agendado_b = st.checkbox("Marcar como Agendado", value=ja_agendado_busca, key=f"chk_b_{colab_nome}")
             
             if foi_agendado_b != ja_agendado_busca:
@@ -270,7 +294,7 @@ try:
             
             ja_marcado_card = nome_alerta in lista_agendados_salvos
 
-            cor, fundo, status = ("#ef4444", "#fff1f2", "🚨 ASO VENCIDO") if dias < 0 else (("#f59e0b", "#fff7ed", f"⚠️ Vence in {dias} dias") if dias <= 3 else ("#10b981", "#ecfdf5", f"✅ Vence in {dias} dias"))
+            cor, fundo, status = ("#ef4444", "#fff1f2", "🚨 ASO VENCIDO") if dias < 0 else (("#f59e0b", "#fff7ed", f"⚠️ Vence em {dias} dias") if dias <= 3 else ("#10b981", "#ecfdf5", f"✅ Vence em {dias} dias"))
             badge_agendado = '<span style="background-color: #2563eb; color: white; padding: 3px 8px; border-radius: 6px; font-size: 13px; font-weight: bold; margin-left: 10px;">📌 AGENDADO</span>' if ja_marcado_card else ""
 
             html_card = f"""
@@ -289,7 +313,6 @@ try:
                         dt_s = st.date_input("Data sugerida", value=hoje + timedelta(days=2), key=f"d_{nome_alerta}")
                     with c_card2:
                         st.markdown("<br>", unsafe_allow_html=True)
-                        # KEY baseada no nome do alerta impede a perda de estado ao atualizar a unidade
                         foi_agendado_card = st.checkbox("Marcar como Agendado", value=ja_marcado_card, key=f"chk_c_{nome_alerta}")
                         
                         if foi_agendado_card != ja_marcado_card:

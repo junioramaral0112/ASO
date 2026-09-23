@@ -29,7 +29,6 @@ PATH_ASO_IMG = localizar_arquivo(r"C:\Users\dilceu.gomes\Desktop\sistema_aso\ASO
 PATH_LOGO = localizar_arquivo(r"C:\Users\dilceu.gomes\Desktop\sistema_aso\logo.png", "logo.png")
 PATH_LOGO_DOC = localizar_arquivo(r"C:\Users\dilceu.gomes\Desktop\sistema_aso\adivitta.png", "adivitta.png")
 
-# Função para converter imagem para Base64
 def carregar_imagem_base64(path):
     if path and os.path.exists(path):
         with open(path, "rb") as img_file:
@@ -80,7 +79,7 @@ div[data-testid="metric-container"] {{ background: white; border-radius: 18px; p
 /* BOTÃO DE DOWNLOAD (PRINCIPAL) */
 .stDownloadButton button {{ width: 100%; background: linear-gradient(90deg, #2563eb, #1d4ed8); color: white; border-radius: 12px; font-weight: bold; }}
 
-/* AJUSTE DO BOTÃO CHECKLIST NA SIDEBAR (RESOLVE TEXTO APAGADO) */
+/* AJUSTE DO BOTÃO CHECKLIST NA SIDEBAR */
 section[data-testid="stSidebar"] .stButton > button {{
     background-color: #2563eb !important;
     color: white !important;
@@ -108,7 +107,6 @@ section[data-testid="stSidebar"] .stButton > button:hover {{
     padding-bottom: 5px;
 }}
 
-/* TÍTULO COM IMAGEM AMPLIADA */
 .header-wrapper {{
     display: flex;
     align-items: center;
@@ -152,7 +150,7 @@ def load_data(gid):
     df.columns = df.columns.str.strip()
     return df
 
-def gerar_docx(dados, tipo, data_sugestao):
+def gerar_docx(dados, tipo, data_sugestao, unidade_padrao="MACROMAQ"):
     doc = Document()
     if PATH_LOGO_DOC and os.path.exists(PATH_LOGO_DOC):
         p = doc.add_paragraph()
@@ -167,7 +165,15 @@ def gerar_docx(dados, tipo, data_sugestao):
     table = doc.add_table(rows=7, cols=2)
     table.style = "Table Grid"
     labels = ["Nome Completo", "Cargo", "Setor", "Unidade", "Cliente", "Local", "Data Sugestão"]
-    valores = [str(dados["Nome"]), str(dados["Cargo"]), str(dados["Setor"]), str(dados.get("UNIDADE", aba_nome)), "MACROMAQ", "Arapoti", data_sugestao.strftime("%d/%m/%Y")]
+    valores = [
+        str(dados.get("Nome", "")),
+        str(dados.get("Cargo", "")),
+        str(dados.get("Setor", "")),
+        str(dados.get("UNIDADE", unidade_padrao)),
+        "MACROMAQ",
+        "Arapoti",
+        data_sugestao.strftime("%d/%m/%Y")
+    ]
 
     for i, (l, v) in enumerate(zip(labels, valores)):
         table.rows[i].cells[0].text, table.rows[i].cells[1].text = l, v
@@ -182,16 +188,17 @@ def gerar_docx(dados, tipo, data_sugestao):
 # =========================================================
 colab_param = st.query_params.get("colaborador", None)
 unidade_inicial_idx = 0
+nome_alvo = None
 
-# Se veio um colaborador pela URL, procura em qual unidade ele está
 if colab_param:
     nome_alvo = normalizar_texto(unquote(str(colab_param)))
+    # Procura em qual unidade o colaborador está cadastrado
     for idx_u, (nome_unidade, gid_unidade) in enumerate(UNIDADES.items()):
         try:
             df_temp = load_data(gid_unidade)
             if not df_temp.empty and "Nome" in df_temp.columns:
                 nomes_norm = df_temp["Nome"].astype(str).apply(normalizar_texto)
-                if any(nome_alvo in n or n in nome_alvo for n in nomes_norm):
+                if any(nome_alvo in n or n in nome_alvo for n in nomes_norm if n):
                     unidade_inicial_idx = idx_u
                     break
         except:
@@ -228,53 +235,77 @@ try:
     df = load_data(UNIDADES[aba_nome])
     if not df.empty:
         hoje = datetime.now()
-        df["Venc"] = pd.to_datetime(df["Venc"], dayfirst=True, errors="coerce")
-        df = df.dropna(subset=["Venc"])
-        df["Dias"] = (df["Venc"] - hoje).dt.days
         
-        # Filtro prioritário caso tenha vindo pela URL
-        registro_focado = None
-        if colab_param:
-            nome_alvo = normalizar_texto(unquote(str(colab_param)))
-            df["Nome_Norm"] = df["Nome"].astype(str).apply(normalizar_texto)
-            match_colab = df[df["Nome_Norm"].str.contains(nome_alvo, na=False) | df["Nome_Norm"].apply(lambda x: x in nome_alvo)]
-            if not match_colab.empty:
-                registro_focado = match_colab.iloc[0]
+        # -------------------------------------------------------------
+        # 1. SEÇÃO: BUSCA ATIVA E EMISSÃO DE GUIA AVULSA (INTEGRAÇÃO COM A URL)
+        # -------------------------------------------------------------
+        st.markdown("### 🔍 Busca Ativa e Emissão de Guia Avulsa")
+        
+        lista_colaboradores_unid = sorted(df["Nome"].dropna().astype(str).unique().tolist())
+        
+        # Define o índice selecionado caso tenha vindo pela URL
+        idx_busca = 0
+        tem_selecionado = False
+        
+        if nome_alvo:
+            for i, nome_item in enumerate(lista_colaboradores_unid):
+                n_norm = normalizar_texto(nome_item)
+                if nome_alvo in n_norm or n_norm in nome_alvo:
+                    idx_busca = i
+                    tem_selecionado = True
+                    break
+        
+        # Campo exatamente como no seu app original:
+        if tem_selecionado:
+            colab_selecionado = st.selectbox(
+                "Digite ou selecione o nome do colaborador:",
+                options=lista_colaboradores_unid,
+                index=idx_busca
+            )
+        else:
+            colab_selecionado = st.selectbox(
+                "Digite ou selecione o nome do colaborador:",
+                options=["Selecione um colaborador..."] + lista_colaboradores_unid,
+                index=0
+            )
 
-        alertas = df[df["Venc"] <= hoje + timedelta(days=10)].copy().sort_values(by="Venc")
+        # Se houver um colaborador selecionado na Busca Ativa, abre a emissão rápida
+        if colab_selecionado and colab_selecionado != "Selecione um colaborador...":
+            dados_avulso = df[df["Nome"] == colab_selecionado].iloc[0]
+            
+            c_info, c_form = st.columns([1, 1])
+            with c_info:
+                st.info(f"👤 **Colaborador:** {dados_avulso['Nome']}\n\n👔 **Cargo:** {dados_avulso.get('Cargo', 'Não informado')}\n\n🏭 **Setor:** {dados_avulso.get('Setor', 'Não informado')}")
+            
+            with c_form:
+                with st.expander("📄 Gerar Formulário de Agendamento", expanded=True):
+                    tipo_avulso = st.selectbox("Tipo de Exame", ["PERIÓDICO", "MUDANÇA DE RISCO", "RETORNO", "ADMISSIONAL"], key="tipo_avulso")
+                    dt_avulso = st.date_input("Data sugerida", value=hoje + timedelta(days=2), key="data_avulso")
+                    btn_doc_avulso = gerar_docx(dados_avulso, tipo_avulso, dt_avulso, aba_nome)
+                    st.download_button(
+                        label="📥 Baixar Guia de Agendamento (DOCX)",
+                        data=btn_doc_avulso,
+                        file_name=f"ASO_{dados_avulso['Nome']}.docx",
+                        key="btn_download_avulso"
+                    )
+
+        st.markdown("<hr style='margin: 25px 0;'>", unsafe_allow_html=True)
+
+        # -------------------------------------------------------------
+        # 2. MONITORAMENTO AUTOMÁTICO DE PRAZOS (CARDS E ALERTAS)
+        # -------------------------------------------------------------
+        df["Venc"] = pd.to_datetime(df["Venc"], dayfirst=True, errors="coerce")
+        df_alertas = df.dropna(subset=["Venc"]).copy()
+        df_alertas["Dias"] = (df_alertas["Venc"] - hoje).dt.days
+        alertas = df_alertas[df_alertas["Venc"] <= hoje + timedelta(days=10)].copy().sort_values(by="Venc")
 
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("🏢 Unidade", aba_nome); c2.metric("👥 Colaboradores", len(df))
-        c3.metric("⚠️ Pendentes", len(alertas)); c4.metric("🚨 Vencidos", len(alertas[alertas["Dias"] < 0]))
+        c1.metric("🏢 Unidade", aba_nome)
+        c2.metric("👥 Colaboradores", len(df))
+        c3.metric("⚠️ Pendentes", len(alertas))
+        c4.metric("🚨 Vencidos", len(alertas[alertas["Dias"] < 0]))
 
-        # SE HOUVER UM COLABORADOR SELECIONADO PELA URL, MOSTRA ELE EM DESTAQUE NO TOPO
-        if registro_focado is not None:
-            st.markdown("---")
-            st.markdown(f"### 🎯 Colaborador Selecionado: **{registro_focado['Nome']}**")
-            
-            dias_foco = int(registro_focado["Dias"])
-            cor_foco, fundo_foco, status_foco = ("#ef4444", "#fff1f2", "🚨 ASO VENCIDO") if dias_foco < 0 else (("#f59e0b", "#fff7ed", f"⚠️ Vence em {dias_foco} dias") if dias_foco <= 3 else ("#10b981", "#ecfdf5", f"✅ Vence em {dias_foco} dias"))
-            
-            col_card, col_form = st.columns([1, 1])
-            with col_card:
-                html_card_foco = f"""
-                <div style="background:{fundo_foco}; border-left:8px solid {cor_foco}; border-radius:18px; padding:22px; margin-bottom:15px; box-shadow:0 4px 18px rgba(0,0,0,0.08); font-family:Arial;">
-                    <div style="font-size:22px; font-weight:700; color:#111827; margin-bottom:10px;">{registro_focado['Nome']}</div>
-                    <div style="color:#475569; font-size:15px; line-height:1.8;">👔 <b>Cargo:</b> {registro_focado['Cargo']}<br>🏭 <b>Setor:</b> {registro_focado['Setor']}<br>📅 <b>Vencimento:</b> {registro_focado['Venc'].strftime('%d/%m/%Y')}</div>
-                    <div style="margin-top:15px; font-size:16px; font-weight:bold; color:{cor_foco};">{status_foco}</div>
-                </div>"""
-                components.html(html_card_foco, height=220)
-                
-            with col_form:
-                with st.container():
-                    st.markdown("##### 📄 Formulário de Agendamento")
-                    tipo_foco = st.selectbox("Tipo de Exame", ["PERIÓDICO", "MUDANÇA DE RISCO", "RETORNO"], key="tipo_foco")
-                    dt_foco = st.date_input("Data sugerida", value=hoje + timedelta(days=2), key="data_foco")
-                    btn_doc_foco = gerar_docx(registro_focado, tipo_foco, dt_foco)
-                    st.download_button(label="📥 Baixar Documento ASO", data=btn_doc_foco, file_name=f"ASO_{registro_focado['Nome']}.docx", key="btn_foco")
-
-        st.markdown("---")
-        st.markdown("#### 📋 Alertas de Vencimento da Unidade")
+        st.markdown("#### 📋 Alertas de Vencimento da Unidade (Próximos Vencimentos)")
         cols = st.columns(2)
         for idx, (_, row) in enumerate(alertas.iterrows()):
             col = cols[idx % 2]
@@ -290,10 +321,10 @@ try:
 
             with col:
                 components.html(html_card, height=250)
-                with st.expander(f"📄 Gerar Agendamento - {row['Nome'].split()[0]}"):
+                with st.expander(f"📄 Gerar Agendamento - {str(row['Nome']).split()[0]}"):
                     tipo = st.selectbox("Tipo de Exame", ["PERIÓDICO", "MUDANÇA DE RISCO", "RETORNO"], key=f"t_{idx}")
                     dt_s = st.date_input("Data sugerida", value=hoje + timedelta(days=2), key=f"d_{idx}")
-                    btn_doc = gerar_docx(row, tipo, dt_s)
+                    btn_doc = gerar_docx(row, tipo, dt_s, aba_nome)
                     st.download_button(label="📥 Baixar Documento", data=btn_doc, file_name=f"ASO_{row['Nome']}.docx", key=f"b_{idx}")
 except Exception as e:
     st.error(f"Erro: {e}")

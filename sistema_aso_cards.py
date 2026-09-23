@@ -9,6 +9,8 @@ from io import BytesIO
 import os
 from PIL import Image
 import base64
+import unicodedata
+from urllib.parse import unquote
 
 # =========================================================
 # CONFIGURAÇÃO DE CAMINHOS DINÂMICOS
@@ -33,6 +35,12 @@ def carregar_imagem_base64(path):
         with open(path, "rb") as img_file:
             return base64.b64encode(img_file.read()).decode()
     return None
+
+def normalizar_texto(texto):
+    if not isinstance(texto, str):
+        return ""
+    texto = unicodedata.normalize("NFKD", texto).encode("ASCII", "ignore").decode("ASCII")
+    return texto.strip().upper()
 
 # =========================================================
 # CONFIGURAÇÃO DA PÁGINA
@@ -159,7 +167,7 @@ def gerar_docx(dados, tipo, data_sugestao):
     table = doc.add_table(rows=7, cols=2)
     table.style = "Table Grid"
     labels = ["Nome Completo", "Cargo", "Setor", "Unidade", "Cliente", "Local", "Data Sugestão"]
-    valores = [str(dados["Nome"]), str(dados["Cargo"]), str(dados["Setor"]), str(dados["UNIDADE"]), "MACROMAQ", "Arapoti", data_sugestao.strftime("%d/%m/%Y")]
+    valores = [str(dados["Nome"]), str(dados["Cargo"]), str(dados["Setor"]), str(dados.get("UNIDADE", aba_nome)), "MACROMAQ", "Arapoti", data_sugestao.strftime("%d/%m/%Y")]
 
     for i, (l, v) in enumerate(zip(labels, valores)):
         table.rows[i].cells[0].text, table.rows[i].cells[1].text = l, v
@@ -170,6 +178,26 @@ def gerar_docx(dados, tipo, data_sugestao):
     return target.getvalue()
 
 # =========================================================
+# CAPTURA DE PARÂMETROS DA URL (?colaborador=...)
+# =========================================================
+colab_param = st.query_params.get("colaborador", None)
+unidade_inicial_idx = 0
+
+# Se veio um colaborador pela URL, procura em qual unidade ele está
+if colab_param:
+    nome_alvo = normalizar_texto(unquote(str(colab_param)))
+    for idx_u, (nome_unidade, gid_unidade) in enumerate(UNIDADES.items()):
+        try:
+            df_temp = load_data(gid_unidade)
+            if not df_temp.empty and "Nome" in df_temp.columns:
+                nomes_norm = df_temp["Nome"].astype(str).apply(normalizar_texto)
+                if any(nome_alvo in n or n in nome_alvo for n in nomes_norm):
+                    unidade_inicial_idx = idx_u
+                    break
+        except:
+            pass
+
+# =========================================================
 # SIDEBAR
 # =========================================================
 
@@ -178,7 +206,8 @@ if PATH_LOGO and os.path.exists(PATH_LOGO):
 
 aba_nome = st.sidebar.selectbox(
     "🏢 Selecione a unidade",
-    list(UNIDADES.keys())
+    list(UNIDADES.keys()),
+    index=unidade_inicial_idx
 )
 
 st.sidebar.success("✅ Sistema Online")
@@ -202,13 +231,50 @@ try:
         df["Venc"] = pd.to_datetime(df["Venc"], dayfirst=True, errors="coerce")
         df = df.dropna(subset=["Venc"])
         df["Dias"] = (df["Venc"] - hoje).dt.days
+        
+        # Filtro prioritário caso tenha vindo pela URL
+        registro_focado = None
+        if colab_param:
+            nome_alvo = normalizar_texto(unquote(str(colab_param)))
+            df["Nome_Norm"] = df["Nome"].astype(str).apply(normalizar_texto)
+            match_colab = df[df["Nome_Norm"].str.contains(nome_alvo, na=False) | df["Nome_Norm"].apply(lambda x: x in nome_alvo)]
+            if not match_colab.empty:
+                registro_focado = match_colab.iloc[0]
+
         alertas = df[df["Venc"] <= hoje + timedelta(days=10)].copy().sort_values(by="Venc")
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("🏢 Unidade", aba_nome); c2.metric("👥 Colaboradores", len(df))
         c3.metric("⚠️ Pendentes", len(alertas)); c4.metric("🚨 Vencidos", len(alertas[alertas["Dias"] < 0]))
 
+        # SE HOUVER UM COLABORADOR SELECIONADO PELA URL, MOSTRA ELE EM DESTAQUE NO TOPO
+        if registro_focado is not None:
+            st.markdown("---")
+            st.markdown(f"### 🎯 Colaborador Selecionado: **{registro_focado['Nome']}**")
+            
+            dias_foco = int(registro_focado["Dias"])
+            cor_foco, fundo_foco, status_foco = ("#ef4444", "#fff1f2", "🚨 ASO VENCIDO") if dias_foco < 0 else (("#f59e0b", "#fff7ed", f"⚠️ Vence em {dias_foco} dias") if dias_foco <= 3 else ("#10b981", "#ecfdf5", f"✅ Vence em {dias_foco} dias"))
+            
+            col_card, col_form = st.columns([1, 1])
+            with col_card:
+                html_card_foco = f"""
+                <div style="background:{fundo_foco}; border-left:8px solid {cor_foco}; border-radius:18px; padding:22px; margin-bottom:15px; box-shadow:0 4px 18px rgba(0,0,0,0.08); font-family:Arial;">
+                    <div style="font-size:22px; font-weight:700; color:#111827; margin-bottom:10px;">{registro_focado['Nome']}</div>
+                    <div style="color:#475569; font-size:15px; line-height:1.8;">👔 <b>Cargo:</b> {registro_focado['Cargo']}<br>🏭 <b>Setor:</b> {registro_focado['Setor']}<br>📅 <b>Vencimento:</b> {registro_focado['Venc'].strftime('%d/%m/%Y')}</div>
+                    <div style="margin-top:15px; font-size:16px; font-weight:bold; color:{cor_foco};">{status_foco}</div>
+                </div>"""
+                components.html(html_card_foco, height=220)
+                
+            with col_form:
+                with st.container():
+                    st.markdown("##### 📄 Formulário de Agendamento")
+                    tipo_foco = st.selectbox("Tipo de Exame", ["PERIÓDICO", "MUDANÇA DE RISCO", "RETORNO"], key="tipo_foco")
+                    dt_foco = st.date_input("Data sugerida", value=hoje + timedelta(days=2), key="data_foco")
+                    btn_doc_foco = gerar_docx(registro_focado, tipo_foco, dt_foco)
+                    st.download_button(label="📥 Baixar Documento ASO", data=btn_doc_foco, file_name=f"ASO_{registro_focado['Nome']}.docx", key="btn_foco")
+
         st.markdown("---")
+        st.markdown("#### 📋 Alertas de Vencimento da Unidade")
         cols = st.columns(2)
         for idx, (_, row) in enumerate(alertas.iterrows()):
             col = cols[idx % 2]

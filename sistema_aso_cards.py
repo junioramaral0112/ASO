@@ -24,7 +24,6 @@ def localizar_arquivo(caminho_local, nome_arquivo):
     caminho_projeto = os.path.join(BASE_DIR, nome_arquivo)
     return caminho_projeto if os.path.exists(caminho_projeto) else None
 
-# Caminhos dos arquivos
 PATH_ASO_IMG = localizar_arquivo(r"C:\Users\dilceu.gomes\Desktop\sistema_aso\ASO.png", "ASO.png")
 PATH_LOGO = localizar_arquivo(r"C:\Users\dilceu.gomes\Desktop\sistema_aso\logo.png", "logo.png")
 PATH_LOGO_DOC = localizar_arquivo(r"C:\Users\dilceu.gomes\Desktop\sistema_aso\adivitta.png", "adivitta.png")
@@ -60,26 +59,21 @@ st.set_page_config(
 )
 
 # =========================================================
-# CSS GLOBAL E TOPO PERSONALIZADO
+# CSS GLOBAL E TOPO
 # =========================================================
 
 aso_base64 = carregar_imagem_base64(PATH_ASO_IMG)
 
 st.markdown(f"""
 <style>
-/* ESCONDER NAVEGAÇÃO AUTOMÁTICA */
 [data-testid="stSidebarNav"] {{display: none !important;}}
-
-/* FUNDO E ESTILOS GERAIS */
 .stApp {{ background-color: #f1f5f9; }}
 section[data-testid="stSidebar"] {{ background: linear-gradient(180deg, #8390a8, #1e293b); }}
 section[data-testid="stSidebar"] label, section[data-testid="stSidebar"] p {{ color: white !important; }}
 div[data-testid="metric-container"] {{ background: white; border-radius: 18px; padding: 15px; border: 1px solid #e2e8f0; box-shadow: 0 4px 18px rgba(0,0,0,0.06); }}
 
-/* BOTÃO DE DOWNLOAD (PRINCIPAL) */
 .stDownloadButton button {{ width: 100%; background: linear-gradient(90deg, #2563eb, #1d4ed8); color: white; border-radius: 12px; font-weight: bold; }}
 
-/* AJUSTE DO BOTÃO NA SIDEBAR */
 section[data-testid="stSidebar"] .stButton > button {{
     background-color: #2563eb !important;
     color: white !important;
@@ -88,11 +82,6 @@ section[data-testid="stSidebar"] .stButton > button {{
     font-weight: bold !important;
     height: 45px !important;
     transition: 0.3s;
-}}
-
-section[data-testid="stSidebar"] .stButton > button:hover {{
-    background-color: #1d4ed8 !important;
-    border: 1px solid #f9cc0b !important;
 }}
 
 .footer {{ position: fixed; left: 0; bottom: 0; width: 100%; background: rgba(0,0,0,0.8); color: white; text-align: center; padding: 10px; font-size: 13px; z-index: 999; }}
@@ -154,17 +143,16 @@ def load_data(gid):
         return pd.DataFrame()
 
 @st.cache_data(ttl=300)
-def carregar_todos_colaboradores():
-    """Carrega todos os colaboradores de todas as abas para que a busca encontre qualquer um."""
-    dfs = []
-    for unid_nome, gid in UNIDADES.items():
-        df_temp = load_data(gid)
-        if not df_temp.empty and "Nome" in df_temp.columns:
-            df_temp["UNIDADE_ORIGEM"] = unid_nome
-            dfs.append(df_temp)
-    if dfs:
-        df_unificado = pd.concat(dfs, ignore_index=True)
-        return df_unificado.drop_duplicates(subset=["Nome"])
+def carregar_base_completa():
+    """Busca os dados de todas as filiais juntas para busca ativa global."""
+    frames = []
+    for u_nome, gid in UNIDADES.items():
+        d = load_data(gid)
+        if not d.empty and "Nome" in d.columns:
+            d["UNIDADE_REAL"] = u_nome
+            frames.append(d)
+    if frames:
+        return pd.concat(frames, ignore_index=True)
     return pd.DataFrame()
 
 def gerar_docx(dados, tipo, data_sugestao, unidade_padrao="MACROMAQ"):
@@ -186,7 +174,7 @@ def gerar_docx(dados, tipo, data_sugestao, unidade_padrao="MACROMAQ"):
         str(dados.get("Nome", "")),
         str(dados.get("Cargo", "")),
         str(dados.get("Setor", "")),
-        str(dados.get("UNIDADE", dados.get("UNIDADE_ORIGEM", unidade_padrao))),
+        str(dados.get("UNIDADE", dados.get("UNIDADE_REAL", unidade_padrao))),
         "MACROMAQ",
         "Arapoti",
         data_sugestao.strftime("%d/%m/%Y")
@@ -224,43 +212,58 @@ if st.sidebar.button("📋 CHECKLIST SSMA"):
     st.switch_page("pages/app_ssma_ia.py")
 
 # =========================================================
-# BUSCA ATIVA E EMISSÃO DE GUIA AVULSA (COM LEITURA DA URL)
+# 🔍 BUSCA ATIVA E EMISSÃO DE GUIA AVULSA
 # =========================================================
 st.markdown("### 🔍 Busca Ativa e Emissão de Guia Avulsa")
 
-df_geral = carregar_todos_colaboradores()
+df_todos = carregar_base_completa()
 
-if not df_geral.empty and "Nome" in df_geral.columns:
-    lista_nomes_geral = sorted(df_geral["Nome"].dropna().astype(str).unique().tolist())
-    
-    # 1. Captura da URL ?colaborador=...
+if not df_todos.empty and "Nome" in df_todos.columns:
+    # Captura da URL ?colaborador=...
     colab_param = st.query_params.get("colaborador", None)
     
-    idx_selecionado = 0
+    lista_todos_nomes = sorted(df_todos["Nome"].dropna().astype(str).unique().tolist())
+    
+    nome_pre_selecionado = None
     if colab_param:
-        nome_alvo = normalizar_texto(unquote(str(colab_param)))
-        for i, n in enumerate(lista_nomes_geral):
-            n_norm = normalizar_texto(n)
-            if nome_alvo == n_norm or nome_alvo in n_norm or n_norm in nome_alvo:
-                idx_selecionado = i
-                # Força no session_state para garantir a seleção imediata
-                if "colab_busca_ativa" not in st.session_state or st.session_state["colab_busca_ativa"] != n:
-                    st.session_state["colab_busca_ativa"] = n
+        nome_param_limpo = normalizar_texto(unquote(str(colab_param)))
+        for n in lista_todos_nomes:
+            if normalizar_texto(n) == nome_param_limpo or nome_param_limpo in normalizar_texto(n):
+                nome_pre_selecionado = n
                 break
+        
+        # Se não achou por aproximação, usa exatamente o nome que veio na URL
+        if not nome_pre_selecionado:
+            nome_pre_selecionado = unquote(str(colab_param)).strip()
 
-    # 2. Caixa exatamente igual à da imagem
+    # MONTAGEM DAS OPÇÕES:
+    # Se veio colaborador na URL, ele é OBRIGATORIAMENTE o item 0 da lista (pré-selecionado)
+    if nome_pre_selecionado:
+        if nome_pre_selecionado in lista_todos_nomes:
+            opcoes_finais = [nome_pre_selecionado] + [x for x in lista_todos_nomes if x != nome_pre_selecionado]
+        else:
+            opcoes_finais = [nome_pre_selecionado] + lista_todos_nomes
+        idx_padrao = 0
+    else:
+        opcoes_finais = ["Selecione um colaborador..."] + lista_todos_nomes
+        idx_padrao = 0
+
     colab_escolhido = st.selectbox(
         "Digite ou selecione o nome do colaborador:",
-        options=lista_nomes_geral,
-        index=idx_selecionado,
-        key="colab_busca_ativa"
+        options=opcoes_finais,
+        index=idx_padrao
     )
 
-    # 3. Botão azul direto: "Baixar Formulário de [Nome]"
-    if colab_escolhido:
-        dados_colab = df_geral[df_geral["Nome"] == colab_escolhido].iloc[0]
+    # BOTÃO AZUL DIRETO: "Baixar Formulário de [Nome]"
+    if colab_escolhido and colab_escolhido != "Selecione um colaborador...":
+        registro_filtrado = df_todos[df_todos["Nome"] == colab_escolhido]
+        if not registro_filtrado.empty:
+            dados_colab = registro_filtrado.iloc[0]
+        else:
+            # Caso o nome tenha vindo da URL mas falte campos, monta mock com o nome
+            dados_colab = {"Nome": colab_escolhido, "Cargo": "Geral", "Setor": "Operacional", "UNIDADE_REAL": "MACROMAQ"}
+            
         primeiro_nome = str(colab_escolhido).split()[0]
-        
         hoje = datetime.now()
         doc_bytes = gerar_docx(dados_colab, "PERIÓDICO", hoje + timedelta(days=2), aba_nome)
         
@@ -274,24 +277,24 @@ if not df_geral.empty and "Nome" in df_geral.columns:
 st.markdown("<hr style='margin: 25px 0;'>", unsafe_allow_html=True)
 
 # =========================================================
-# MONITORAMENTO AUTOMÁTICO DE PRAZOS (DA UNIDADE NA SIDEBAR)
+# MONITORAMENTO DE ALERTAS DE VENCIMENTO (DA UNIDADE NA SIDEBAR)
 # =========================================================
 try:
-    df = load_data(UNIDADES[aba_nome])
-    if not df.empty and "Nome" in df.columns:
+    df_unidade = load_data(UNIDADES[aba_nome])
+    if not df_unidade.empty and "Nome" in df_unidade.columns:
         hoje = datetime.now()
-        df["Venc"] = pd.to_datetime(df["Venc"], dayfirst=True, errors="coerce")
-        df_alertas = df.dropna(subset=["Venc"]).copy()
+        df_unidade["Venc"] = pd.to_datetime(df_unidade["Venc"], dayfirst=True, errors="coerce")
+        df_alertas = df_unidade.dropna(subset=["Venc"]).copy()
         df_alertas["Dias"] = (df_alertas["Venc"] - hoje).dt.days
         alertas = df_alertas[df_alertas["Venc"] <= hoje + timedelta(days=10)].copy().sort_values(by="Venc")
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("🏢 Unidade", aba_nome)
-        c2.metric("👥 Colaboradores", len(df))
+        c2.metric("👥 Colaboradores", len(df_unidade))
         c3.metric("⚠️ Pendentes", len(alertas))
         c4.metric("🚨 Vencidos", len(alertas[alertas["Dias"] < 0]))
 
-        st.markdown("#### 📋 Monitoramento Automático de Prazos (Próximos Vencimentos)")
+        st.markdown("#### 📋 Alertas de Vencimento da Unidade")
         cols = st.columns(2)
         for idx, (_, row) in enumerate(alertas.iterrows()):
             col = cols[idx % 2]

@@ -45,7 +45,7 @@ def normalizar_texto(texto):
     return texto.strip().upper()
 
 # =========================================================
-# FUNÇÕES DE PERSISTÊNCIA (GRAVAÇÃO LOCAL DOS AGENDAMENTOS)
+# PERSISTÊNCIA DOS AGENDAMENTOS EM ARQUIVO (NÃO SOME COM F5)
 # =========================================================
 
 def ler_banco_agendamentos():
@@ -363,11 +363,10 @@ try:
                 setor_str = str(row.get("Setor", "Não informado")) if pd.notna(row.get("Setor")) and str(row.get("Setor")).strip() != "" else "Não informado"
                 venc_str = row["Venc"].strftime("%d/%m/%Y")
 
-                # Chave de identificação única do colaborador
                 chave_registro = f"{aba_nome}_{nome_str}"
                 dados_locais = banco_ag.get(chave_registro, None)
 
-                # Prioridade: 1) Dados salvos pelo utilizador na app | 2) Dados vindos da coluna da folha
+                # Prioridade de exibição: Local (app) ou Planilha
                 agendado_ativo = False
                 texto_detalhe_agendamento = ""
                 
@@ -377,15 +376,15 @@ try:
                     hora_salva = dados_locais.get("hora", "")
                     obs_salva = dados_locais.get("obs", "")
                     if agendado_ativo:
-                        texto_detalhe_agendamento = f"🗓️ {data_salva}" + (f" às {hora_salva}" if hora_salva else "")
+                        texto_detalhe_agendamento = f"🗓️ <b>Agendado:</b> {data_salva}" + (f" às {hora_salva}" if hora_salva else "")
                         if obs_salva:
-                            texto_detalhe_agendamento += f"<br>📝 {obs_salva}"
+                            texto_detalhe_agendamento += f"<br>📝 <b>Obs:</b> {obs_salva}"
                 else:
                     if "Agendamento" in row.index and pd.notna(row["Agendamento"]):
                         txt_planilha = str(row["Agendamento"]).strip()
                         if txt_planilha and txt_planilha.lower() not in ["nan", "none"]:
                             agendado_ativo = True
-                            texto_detalhe_agendamento = f"📋 {txt_planilha}"
+                            texto_detalhe_agendamento = f"🗓️ <b>Agendado:</b> {txt_planilha}"
 
                 badge_html = ""
                 detalhes_html = ""
@@ -414,19 +413,10 @@ try:
                     partes_nome = nome_str.split()
                     primeiro_nome_card = partes_nome[0] if len(partes_nome) > 0 else "Colaborador"
                     
-                    with st.expander(f"📄 Formulário e Agendamento - {primeiro_nome_card}"):
-                        st.markdown("##### 📝 Formulário Word")
+                    with st.expander(f"⚙️ Gerar Agendamento - {primeiro_nome_card}"):
                         tipo = st.selectbox("Tipo de Exame", ["PERIÓDICO", "MUDANÇA DE RISCO", "RETORNO"], key=f"t_{idx}")
-                        dt_s = st.date_input("Data sugerida para formulário", value=hoje + timedelta(days=2), key=f"d_{idx}")
-                        btn_doc = gerar_docx(row, tipo, dt_s, aba_nome)
-                        st.download_button(label="📥 Baixar Documento Word", data=btn_doc, file_name=f"ASO_{nome_str}.docx", key=f"b_{idx}")
                         
-                        st.markdown("---")
-                        st.markdown("##### 📌 Dados do Agendamento")
-                        
-                        # Valores padrão para edição
-                        padrao_marcado = agendado_ativo
-                        
+                        # Data sugerida (que é a mesma data do agendamento)
                         padrao_data = (hoje + timedelta(days=2)).date()
                         if dados_locais and dados_locais.get("data"):
                             try:
@@ -434,22 +424,46 @@ try:
                             except Exception:
                                 pass
                                 
-                        padrao_hora = dados_locais.get("hora", "08:00") if dados_locais else "08:00"
-                        padrao_obs = dados_locais.get("obs", "") if dados_locais else (row.get("Agendamento", "") if pd.notna(row.get("Agendamento")) else "")
-
-                        check_agendado = st.checkbox("Marcar como AGENDADO", value=padrao_marcado, key=f"chk_{chave_registro}_{idx}")
-                        campo_data = st.date_input("Data do Exame", value=padrao_data, key=f"dt_ag_{chave_registro}_{idx}")
-                        campo_hora = st.text_input("Horário (ex: 08:30)", value=padrao_hora, key=f"hr_ag_{chave_registro}_{idx}")
-                        campo_obs = st.text_area("Observações (Ex: Clínica, Exames complementares...)", value=str(padrao_obs), key=f"obs_ag_{chave_registro}_{idx}")
+                        dt_sugestao = st.date_input("📅 Data Sugerida / Agendamento", value=padrao_data, key=f"d_{idx}")
                         
-                        if st.button("💾 Salvar Agendamento", key=f"btn_salvar_{chave_registro}_{idx}"):
+                        # Horário e observações
+                        padrao_hora = dados_locais.get("hora", "08:00") if dados_locais else "08:00"
+                        hora_input = st.text_input("⏰ Horário do Exame (ex: 08:30)", value=padrao_hora, key=f"hr_{chave_registro}_{idx}")
+                        
+                        padrao_obs = dados_locais.get("obs", "") if dados_locais else (str(row.get("Agendamento", "")) if pd.notna(row.get("Agendamento")) and str(row.get("Agendamento")).lower() not in ["nan", "none"] else "")
+                        obs_input = st.text_area("📝 Observações (Clínica, médico, detalhes...)", value=padrao_obs, key=f"obs_{chave_registro}_{idx}")
+
+                        # Opção para desmarcar se for necessário
+                        check_agendado = st.checkbox("Status: AGENDADO", value=agendado_ativo, key=f"chk_{chave_registro}_{idx}")
+
+                        # Callback: ao clicar no download, salva como AGENDADO automaticamente!
+                        def marcar_como_agendado_ao_baixar(chave=chave_registro, data_val=dt_sugestao, hora_val=hora_input, obs_val=obs_input):
+                            gravar_agendamento(chave, {
+                                "status": True,
+                                "data": data_val.strftime("%d/%m/%Y"),
+                                "hora": hora_val.strip(),
+                                "obs": obs_val.strip()
+                            })
+
+                        btn_doc = gerar_docx(row, tipo, dt_sugestao, aba_nome)
+                        
+                        st.download_button(
+                            label="📥 Baixar Documento e Marcar como Agendado",
+                            data=btn_doc,
+                            file_name=f"ASO_{nome_str}.docx",
+                            key=f"b_{idx}",
+                            on_click=marcar_como_agendado_ao_baixar
+                        )
+
+                        # Botão manual adicional caso queira salvar alterações sem descarregar o Word
+                        if st.button("💾 Salvar Alterações", key=f"btn_salvar_{chave_registro}_{idx}"):
                             gravar_agendamento(chave_registro, {
                                 "status": check_agendado,
-                                "data": campo_data.strftime("%d/%m/%Y"),
-                                "hora": campo_hora.strip(),
-                                "obs": campo_obs.strip()
+                                "data": dt_sugestao.strftime("%d/%m/%Y"),
+                                "hora": hora_input.strip(),
+                                "obs": obs_input.strip()
                             })
-                            st.toast("✅ Informações de agendamento gravadas com sucesso!")
+                            st.toast("✅ Informações salvas com sucesso!")
                             st.rerun()
     else:
         st.warning(f"Sem dados carregados para a unidade {aba_nome}.")

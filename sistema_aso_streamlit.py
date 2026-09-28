@@ -65,6 +65,16 @@ def gravar_agendamento(chave, dados):
     except Exception as e:
         st.error(f"Erro ao salvar localmente: {e}")
 
+def remover_agendamento(chave):
+    """Remove o agendamento e marca como cancelado para sobrepor a planilha se necessário."""
+    banco = ler_banco_agendamentos()
+    banco[chave] = {"status": False, "data": "", "hora": "", "obs": ""}
+    try:
+        with open(PATH_AGENDAMENTOS_JSON, "w", encoding="utf-8") as f:
+            json.dump(banco, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        st.error(f"Erro ao atualizar: {e}")
+
 # =========================================================
 # CONFIGURAÇÃO DA PÁGINA
 # =========================================================
@@ -148,7 +158,7 @@ section[data-testid="stSidebar"] .stButton > button {{
 """, unsafe_allow_html=True)
 
 # =========================================================
-# LÓGICA DE DADOS (TODAS AS UNIDADES MANTIDAS)
+# LÓGICA DE DADOS
 # =========================================================
 
 SHEET_ID = "1G_oVT9gK-n_jGh5R4g65qUwK_MfQGvCX-SA4NHNNflU"
@@ -172,7 +182,6 @@ def load_data(gid):
             
         df.columns = df.columns.astype(str).str.strip()
         
-        # Filtra linhas vazias ou sem nome
         if "Nome" in df.columns:
             df = df.dropna(subset=["Nome"]).copy()
             df["Nome"] = df["Nome"].astype(str).str.strip()
@@ -182,7 +191,6 @@ def load_data(gid):
             
         return df
     except Exception:
-        # Retorna DataFrame vazio sem quebrar as outras unidades
         return pd.DataFrame()
 
 @st.cache_data(ttl=60)
@@ -330,7 +338,6 @@ try:
         df_unidade["Venc"] = pd.to_datetime(df_unidade["Venc"], dayfirst=True, errors="coerce")
         df_alertas = df_unidade.dropna(subset=["Venc", "Nome"]).copy()
         
-        # Filtro estrito para eliminar 'nan' e datas fantasmas de 1899
         df_alertas["Nome_Limpo"] = df_alertas["Nome"].astype(str).str.strip()
         df_alertas = df_alertas[df_alertas["Nome_Limpo"] != ""]
         df_alertas = df_alertas[df_alertas["Nome_Limpo"].str.lower() != "nan"]
@@ -421,7 +428,7 @@ try:
                     with st.expander(f"⚙️ Gerar Agendamento / Guia - {primeiro_nome_card}"):
                         tipo = st.selectbox("Tipo de Exame", ["PERIÓDICO", "MUDANÇA DE RISCO", "RETORNO"], key=f"t_{idx}")
                         
-                        # Data sugerida que será a data do agendamento
+                        # Data sugerida (mesma data do agendamento)
                         padrao_data = (hoje + timedelta(days=2)).date()
                         if dados_locais and dados_locais.get("data"):
                             try:
@@ -438,10 +445,7 @@ try:
                         padrao_obs = dados_locais.get("obs", "") if dados_locais else (str(row.get("Agendamento", "")) if pd.notna(row.get("Agendamento")) and str(row.get("Agendamento")).lower() not in ["nan", "none"] else "")
                         obs_input = st.text_area("📝 Observações (Clínica, médico, detalhes...)", value=padrao_obs, key=f"obs_{chave_registro}_{idx}")
 
-                        # Checkbox para controle manual do status
-                        check_agendado = st.checkbox("Status: AGENDADO", value=agendado_ativo, key=f"chk_{chave_registro}_{idx}")
-
-                        # Função disparada automaticamente ao clicar no download
+                        # Função disparada automaticamente ao baixar
                         def salvar_e_agendar(chave=chave_registro, data_val=dt_sugestao, hora_val=hora_input, obs_val=obs_input):
                             gravar_agendamento(chave, {
                                 "status": True,
@@ -452,7 +456,7 @@ try:
 
                         btn_doc = gerar_docx(row, tipo, dt_sugestao, aba_nome)
                         
-                        # Botão de download que já marca como AGENDADO
+                        # Botão de download com marcação automática
                         st.download_button(
                             label="📥 Baixar Documento e Marcar como Agendado",
                             data=btn_doc,
@@ -461,16 +465,13 @@ try:
                             on_click=salvar_e_agendar
                         )
 
-                        # Botão alternativo caso queira salvar sem baixar o arquivo
-                        if st.button("💾 Apenas Salvar Status", key=f"btn_salvar_{chave_registro}_{idx}"):
-                            gravar_agendamento(chave_registro, {
-                                "status": check_agendado,
-                                "data": dt_sugestao.strftime("%d/%m/%Y"),
-                                "hora": hora_input.strip(),
-                                "obs": obs_input.strip()
-                            })
-                            st.toast("✅ Alterações salvas!")
-                            st.rerun()
+                        # BOTÃO PARA LIMPAR O AGENDAMENTO
+                        if agendado_ativo:
+                            st.markdown("<br>", unsafe_allow_html=True)
+                            if st.button("🗑️ Limpar / Desmarcar Agendamento", key=f"btn_limpar_{chave_registro}_{idx}"):
+                                remover_agendamento(chave_registro)
+                                st.toast("🗑️ Agendamento removido com sucesso!")
+                                st.rerun()
     else:
         st.warning(f"Sem dados carregados para a unidade {aba_nome}.")
 except Exception as e:

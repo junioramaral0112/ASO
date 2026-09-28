@@ -58,6 +58,10 @@ st.set_page_config(
     page_icon=page_icon
 )
 
+# Inicializa o banco de dados de agendamentos na sessão para persistir as marcações
+if "agendamentos_salvos" not in st.session_state:
+    st.session_state.agendamentos_salvos = {}
+
 # =========================================================
 # CSS GLOBAL E TOPO
 # =========================================================
@@ -128,23 +132,31 @@ section[data-testid="stSidebar"] .stButton > button {{
 
 SHEET_ID = "1G_oVT9gK-n_jGh5R4g65qUwK_MfQGvCX-SA4NHNNflU"
 UNIDADES = {
-    "D-ITU": "1323067532", "D-MG": "1071212860", 
-    "J-CHP": "1549718037", "S-SJ": "1712391604", "J-CTBA": "145843404"
+    "D-ITU": "1323067532", 
+    "D-MG": "1071212860", 
+    "J-CHP": "1549718037", 
+    "S-SJ": "1712391604", 
+    "J-CTBA": "145843404"
 }
 
 @st.cache_data(ttl=300)
 def load_data(gid):
     try:
-        url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={gid}"
+        url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={str(gid).strip()}"
         df = pd.read_csv(url)
-        df.columns = df.columns.str.strip()
+        df.columns = df.columns.astype(str).str.strip()
+        
+        if "Nome" in df.columns:
+            df = df.dropna(subset=["Nome"])
+            df = df[df["Nome"].astype(str).str.strip().str.lower() != "nan"]
+            df = df[df["Nome"].astype(str).str.strip() != ""]
         return df
-    except:
+    except Exception as err:
+        st.warning(f"Aviso: Não foi possível carregar a planilha (GID: {gid}). Detalhe: {err}")
         return pd.DataFrame()
 
 @st.cache_data(ttl=300)
 def carregar_base_completa():
-    """Busca os dados de todas as filiais juntas para busca ativa global."""
     frames = []
     for u_nome, gid in UNIDADES.items():
         d = load_data(gid)
@@ -170,11 +182,17 @@ def gerar_docx(dados, tipo, data_sugestao, unidade_padrao="MACROMAQ"):
     table = doc.add_table(rows=7, cols=2)
     table.style = "Table Grid"
     labels = ["Nome Completo", "Cargo", "Setor", "Unidade", "Cliente", "Local", "Data Sugestão"]
+    
+    nome_val = str(dados.get("Nome", "")) if pd.notna(dados.get("Nome")) else ""
+    cargo_val = str(dados.get("Cargo", "")) if pd.notna(dados.get("Cargo")) else ""
+    setor_val = str(dados.get("Setor", "")) if pd.notna(dados.get("Setor")) else ""
+    unid_val = str(dados.get("UNIDADE", dados.get("UNIDADE_REAL", unidade_padrao)))
+
     valores = [
-        str(dados.get("Nome", "")),
-        str(dados.get("Cargo", "")),
-        str(dados.get("Setor", "")),
-        str(dados.get("UNIDADE", dados.get("UNIDADE_REAL", unidade_padrao))),
+        nome_val,
+        cargo_val,
+        setor_val,
+        unid_val,
         "MACROMAQ",
         "Arapoti",
         data_sugestao.strftime("%d/%m/%Y")
@@ -201,12 +219,8 @@ aba_nome = st.sidebar.selectbox(
 )
 
 st.sidebar.success("✅ Sistema Online")
-
 st.sidebar.markdown("<br>", unsafe_allow_html=True)
-st.sidebar.markdown(
-    "<div class='menu-titulo'>⚡ ACESSO RÁPIDO</div>",
-    unsafe_allow_html=True
-)
+st.sidebar.markdown("<div class='menu-titulo'>⚡ ACESSO RÁPIDO</div>", unsafe_allow_html=True)
 
 if st.sidebar.button("📋 CHECKLIST SSMA"):
     st.switch_page("pages/app_ssma_ia.py")
@@ -219,10 +233,9 @@ st.markdown("### 🔍 Busca Ativa e Emissão de Guia Avulsa")
 df_todos = carregar_base_completa()
 
 if not df_todos.empty and "Nome" in df_todos.columns:
-    # Captura da URL ?colaborador=...
     colab_param = st.query_params.get("colaborador", None)
     
-    lista_todos_nomes = sorted(df_todos["Nome"].dropna().astype(str).unique().tolist())
+    lista_todos_nomes = sorted([str(n).strip() for n in df_todos["Nome"].dropna().unique() if str(n).strip() != ""])
     
     nome_pre_selecionado = None
     if colab_param:
@@ -232,12 +245,9 @@ if not df_todos.empty and "Nome" in df_todos.columns:
                 nome_pre_selecionado = n
                 break
         
-        # Se não achou por aproximação, usa exatamente o nome que veio na URL
         if not nome_pre_selecionado:
             nome_pre_selecionado = unquote(str(colab_param)).strip()
 
-    # MONTAGEM DAS OPÇÕES:
-    # Se veio colaborador na URL, ele é OBRIGATORIAMENTE o item 0 da lista (pré-selecionado)
     if nome_pre_selecionado:
         if nome_pre_selecionado in lista_todos_nomes:
             opcoes_finais = [nome_pre_selecionado] + [x for x in lista_todos_nomes if x != nome_pre_selecionado]
@@ -254,16 +264,15 @@ if not df_todos.empty and "Nome" in df_todos.columns:
         index=idx_padrao
     )
 
-    # BOTÃO AZUL DIRETO: "Baixar Formulário de [Nome]"
     if colab_escolhido and colab_escolhido != "Selecione um colaborador...":
-        registro_filtrado = df_todos[df_todos["Nome"] == colab_escolhido]
+        registro_filtrado = df_todos[df_todos["Nome"].astype(str) == colab_escolhido]
         if not registro_filtrado.empty:
             dados_colab = registro_filtrado.iloc[0]
         else:
-            # Caso o nome tenha vindo da URL mas falte campos, monta mock com o nome
             dados_colab = {"Nome": colab_escolhido, "Cargo": "Geral", "Setor": "Operacional", "UNIDADE_REAL": "MACROMAQ"}
             
-        primeiro_nome = str(colab_escolhido).split()[0]
+        partes = str(colab_escolhido).strip().split()
+        primeiro_nome = partes[0] if partes else "Colaborador"
         hoje = datetime.now()
         doc_bytes = gerar_docx(dados_colab, "PERIÓDICO", hoje + timedelta(days=2), aba_nome)
         
@@ -281,10 +290,13 @@ st.markdown("<hr style='margin: 25px 0;'>", unsafe_allow_html=True)
 # =========================================================
 try:
     df_unidade = load_data(UNIDADES[aba_nome])
-    if not df_unidade.empty and "Nome" in df_unidade.columns:
+    if not df_unidade.empty and "Nome" in df_unidade.columns and "Venc" in df_unidade.columns:
         hoje = datetime.now()
+        
         df_unidade["Venc"] = pd.to_datetime(df_unidade["Venc"], dayfirst=True, errors="coerce")
-        df_alertas = df_unidade.dropna(subset=["Venc"]).copy()
+        df_alertas = df_unidade.dropna(subset=["Venc", "Nome"]).copy()
+        df_alertas = df_alertas[df_alertas["Venc"].dt.year >= 2000]
+        
         df_alertas["Dias"] = (df_alertas["Venc"] - hoje).dt.days
         alertas = df_alertas[df_alertas["Venc"] <= hoje + timedelta(days=10)].copy().sort_values(by="Venc")
 
@@ -295,27 +307,92 @@ try:
         c4.metric("🚨 Vencidos", len(alertas[alertas["Dias"] < 0]))
 
         st.markdown("#### 📋 Alertas de Vencimento da Unidade")
-        cols = st.columns(2)
-        for idx, (_, row) in enumerate(alertas.iterrows()):
-            col = cols[idx % 2]
-            dias = int(row["Dias"])
-            cor, fundo, status = ("#ef4444", "#fff1f2", "🚨 ASO VENCIDO") if dias < 0 else (("#f59e0b", "#fff7ed", f"⚠️ Vence em {dias} dias") if dias <= 3 else ("#10b981", "#ecfdf5", f"✅ Vence em {dias} dias"))
+        
+        if alertas.empty:
+            st.info("Nenhum ASO vencido ou a vencer nos próximos 10 dias para esta unidade.")
+        else:
+            cols = st.columns(2)
+            for idx, (_, row) in enumerate(alertas.iterrows()):
+                col = cols[idx % 2]
+                dias = int(row["Dias"])
+                cor, fundo, status = (
+                    ("#ef4444", "#fff1f2", "🚨 ASO VENCIDO") if dias < 0 
+                    else (("#f59e0b", "#fff7ed", f"⚠️ Vence em {dias} dias") if dias <= 3 
+                    else ("#10b981", "#ecfdf5", f"✅ Vence em {dias} dias"))
+                )
 
-            html_card = f"""
-            <div style="background:{fundo}; border-left:8px solid {cor}; border-radius:18px; padding:22px; margin-bottom:15px; box-shadow:0 4px 18px rgba(0,0,0,0.08); font-family:Arial;">
-                <div style="font-size:22px; font-weight:700; color:#111827; margin-bottom:10px;">{row['Nome']}</div>
-                <div style="color:#475569; font-size:15px; line-height:1.8;">👔 <b>Cargo:</b> {row['Cargo']}<br>🏭 <b>Setor:</b> {row['Setor']}<br>📅 <b>Vencimento:</b> {row['Venc'].strftime('%d/%m/%Y')}</div>
-                <div style="margin-top:15px; font-size:16px; font-weight:bold; color:{cor};">{status}</div>
-            </div>"""
+                nome_str = str(row["Nome"]).strip() if pd.notna(row["Nome"]) else "Não informado"
+                cargo_str = str(row["Cargo"]).strip() if pd.notna(row.get("Cargo")) else "Não informado"
+                setor_str = str(row["Setor"]).strip() if pd.notna(row.get("Setor")) else "Não informado"
+                venc_str = row["Venc"].strftime("%d/%m/%Y")
 
-            with col:
-                components.html(html_card, height=250)
-                with st.expander(f"📄 Gerar Agendamento - {str(row['Nome']).split()[0]}"):
-                    tipo = st.selectbox("Tipo de Exame", ["PERIÓDICO", "MUDANÇA DE RISCO", "RETORNO"], key=f"t_{idx}")
-                    dt_s = st.date_input("Data sugerida", value=hoje + timedelta(days=2), key=f"d_{idx}")
-                    btn_doc = gerar_docx(row, tipo, dt_s, aba_nome)
-                    st.download_button(label="📥 Baixar Documento", data=btn_doc, file_name=f"ASO_{row['Nome']}.docx", key=f"b_{idx}")
+                # Chave única para persistir o agendamento deste colaborador
+                chave_colab = f"{aba_nome}_{nome_str}"
+                dados_agendado = st.session_state.agendamentos_salvos.get(chave_colab, None)
+
+                # Montagem dinâmica do selo de agendado e observações no card
+                badge_html = ""
+                detalhes_agendamento_html = ""
+                if dados_agendado and dados_agendado.get("status"):
+                    badge_html = '<span style="background:#2563eb; color:white; padding:4px 10px; border-radius:8px; font-size:12px; font-weight:bold; margin-left:10px;">📌 AGENDADO</span>'
+                    dt_ag = dados_agendado.get("data", "")
+                    hr_ag = dados_agendado.get("hora", "")
+                    obs_ag = dados_agendado.get("obs", "")
+                    detalhes_agendamento_html = f"""
+                    <div style="margin-top:10px; padding:8px 12px; background:#e0f2fe; border-radius:8px; color:#0369a1; font-size:13px;">
+                        🗓️ <b>Agendado para:</b> {dt_ag} às {hr_ag}<br>
+                        📝 <b>Obs:</b> {obs_ag if obs_ag else 'Nenhuma observação'}
+                    </div>
+                    """
+
+                html_card = f"""
+                <div style="background:{fundo}; border-left:8px solid {cor}; border-radius:18px; padding:22px; margin-bottom:15px; box-shadow:0 4px 18px rgba(0,0,0,0.08); font-family:Arial;">
+                    <div style="font-size:22px; font-weight:700; color:#111827; margin-bottom:10px; display:flex; align-items:center;">
+                        {nome_str} {badge_html}
+                    </div>
+                    <div style="color:#475569; font-size:15px; line-height:1.8;">👔 <b>Cargo:</b> {cargo_str}<br>🏭 <b>Setor:</b> {setor_str}<br>📅 <b>Vencimento:</b> {venc_str}</div>
+                    {detalhes_agendamento_html}
+                    <div style="margin-top:15px; font-size:16px; font-weight:bold; color:{cor};">{status}</div>
+                </div>"""
+
+                with col:
+                    components.html(html_card, height=310 if dados_agendado and dados_agendado.get("status") else 250)
+                    partes_nome = nome_str.split()
+                    primeiro_nome_card = partes_nome[0] if partes_nome else "Colaborador"
+                    
+                    with st.expander(f"📄 Gerar / Gerenciar Agendamento - {primeiro_nome_card}"):
+                        tipo = st.selectbox("Tipo de Exame", ["PERIÓDICO", "MUDANÇA DE RISCO", "RETORNO"], key=f"t_{idx}")
+                        dt_s = st.date_input("Data sugerida", value=hoje + timedelta(days=2), key=f"d_{idx}")
+                        btn_doc = gerar_docx(row, tipo, dt_s, aba_nome)
+                        st.download_button(label="📥 Baixar Documento", data=btn_doc, file_name=f"ASO_{nome_str}.docx", key=f"b_{idx}")
+                        
+                        st.markdown("---")
+                        st.markdown("##### 📌 Controle de Agendamento (Salva na Sessão)")
+                        
+                        # Controles de salvamento de agendamento, data, hora e observação
+                        marcar_como_agendado = st.checkbox("Marcar como Agendado", value=bool(dados_agendado and dados_agendado.get("status")), key=f"chk_ag_{idx}")
+                        
+                        val_data_padrao = datetime.strptime(dados_agendado["data"], "%d/%m/%Y").date() if (dados_agendado and dados_agendado.get("data")) else (hoje + timedelta(days=2)).date()
+                        data_ag_input = st.date_input("Data do Exame", value=val_data_padrao, key=f"dt_ag_{idx}")
+                        
+                        val_hora_padrao = dados_agendado.get("hora", "08:00") if dados_agendado else "08:00"
+                        hora_ag_input = st.text_input("Horário (ex: 09:30)", value=val_hora_padrao, key=f"hr_ag_{idx}")
+                        
+                        val_obs_padrao = dados_agendado.get("obs", "") if dados_agendado else ""
+                        obs_input = st.text_area("Observações (Clínica, guia, detalhes...)", value=val_obs_padrao, key=f"obs_ag_{idx}")
+                        
+                        if st.button("Salvar Agendamento", key=f"btn_salvar_ag_{idx}"):
+                            st.session_state.agendamentos_salvos[chave_colab] = {
+                                "status": marcar_como_agendado,
+                                "data": data_ag_input.strftime("%d/%m/%Y"),
+                                "hora": hora_ag_input,
+                                "obs": obs_input
+                            }
+                            st.success("Agendamento salvo com sucesso!")
+                            st.rerun()
+    else:
+        st.warning(f"Nenhum dado encontrado ou planilha inacessível para a unidade {aba_nome}.")
 except Exception as e:
-    st.error(f"Erro: {e}")
+    st.error(f"Erro ao processar dados: {e}")
 
 st.markdown("""<div class="footer">© 2026 Gestão Documentos | Desenvolvido por: Dilceu Junior</div>""", unsafe_allow_html=True)

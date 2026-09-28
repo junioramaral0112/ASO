@@ -7,6 +7,8 @@ from docx.shared import Inches, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from io import BytesIO
 import os
+import urllib.request
+import urllib.error
 from PIL import Image
 import base64
 import unicodedata
@@ -49,7 +51,7 @@ try:
         page_icon = Image.open(PATH_ASO_IMG)
     else:
         page_icon = "🛡️"
-except:
+except Exception:
     page_icon = "🛡️"
 
 st.set_page_config(
@@ -57,10 +59,6 @@ st.set_page_config(
     layout="wide",
     page_icon=page_icon
 )
-
-# Inicializa o banco de dados de agendamentos na sessão para persistir as marcações
-if "agendamentos_salvos" not in st.session_state:
-    st.session_state.agendamentos_salvos = {}
 
 # =========================================================
 # CSS GLOBAL E TOPO
@@ -131,31 +129,42 @@ section[data-testid="stSidebar"] .stButton > button {{
 # =========================================================
 
 SHEET_ID = "1G_oVT9gK-n_jGh5R4g65qUwK_MfQGvCX-SA4NHNNflU"
+
+# Atualizado conforme as abas visíveis na folha: D-SP, D-MG, D-MS, C-CHP, C-CTBA, S-SJ
 UNIDADES = {
-    "D-ITU": "1323067532", 
-    "D-MG": "1071212860", 
-    "J-CHP": "1549718037", 
-    "S-SJ": "1712391604", 
-    "J-CTBA": "145843404"
+    "C-CTBA": "145843404",
+    "C-CHP": "1549718037",    # Se der erro 400, verifique o gid ao clicar na aba C-CHP
+    "S-SJ": "1712391604",     # Se der erro 400, verifique o gid ao clicar na aba S-SJ
+    "D-MG": "1071212860",
+    "D-ITU": "1323067532"
 }
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=120)
 def load_data(gid):
+    url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={str(gid).strip()}"
     try:
-        url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={str(gid).strip()}"
-        df = pd.read_csv(url)
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as resp:
+            df = pd.read_csv(resp)
         df.columns = df.columns.astype(str).str.strip()
         
+        # Elimina linhas totalmente vazias ou sem nome válido
         if "Nome" in df.columns:
             df = df.dropna(subset=["Nome"])
             df = df[df["Nome"].astype(str).str.strip().str.lower() != "nan"]
             df = df[df["Nome"].astype(str).str.strip() != ""]
         return df
-    except Exception as err:
-        st.warning(f"Aviso: Não foi possível carregar a planilha (GID: {gid}). Detalhe: {err}")
+    except urllib.error.HTTPError as e:
+        if e.code == 400:
+            st.error(f"❌ O GID `{gid}` não corresponde a esta aba no Google Sheets. Clique na aba correspondente na folha e confirme o valor de 'gid=' no link do browser.")
+        else:
+            st.error(f"Erro HTTP {e.code} ao carregar a folha.")
+        return pd.DataFrame()
+    except Exception as ex:
+        st.warning(f"Erro na ligação: {ex}")
         return pd.DataFrame()
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=120)
 def carregar_base_completa():
     frames = []
     for u_nome, gid in UNIDADES.items():
@@ -183,9 +192,9 @@ def gerar_docx(dados, tipo, data_sugestao, unidade_padrao="MACROMAQ"):
     table.style = "Table Grid"
     labels = ["Nome Completo", "Cargo", "Setor", "Unidade", "Cliente", "Local", "Data Sugestão"]
     
-    nome_val = str(dados.get("Nome", "")) if pd.notna(dados.get("Nome")) else ""
-    cargo_val = str(dados.get("Cargo", "")) if pd.notna(dados.get("Cargo")) else ""
-    setor_val = str(dados.get("Setor", "")) if pd.notna(dados.get("Setor")) else ""
+    nome_val = str(dados.get("Nome", "")).strip() if pd.notna(dados.get("Nome")) else ""
+    cargo_val = str(dados.get("Cargo", "")).strip() if pd.notna(dados.get("Cargo")) else ""
+    setor_val = str(dados.get("Setor", "")).strip() if pd.notna(dados.get("Setor")) else ""
     unid_val = str(dados.get("UNIDADE", dados.get("UNIDADE_REAL", unidade_padrao)))
 
     valores = [
@@ -235,7 +244,7 @@ df_todos = carregar_base_completa()
 if not df_todos.empty and "Nome" in df_todos.columns:
     colab_param = st.query_params.get("colaborador", None)
     
-    lista_todos_nomes = sorted([str(n).strip() for n in df_todos["Nome"].dropna().unique() if str(n).strip() != ""])
+    lista_todos_nomes = sorted([str(n).strip() for n in df_todos["Nome"].dropna().unique() if str(n).strip() and str(n).lower() != "nan"])
     
     nome_pre_selecionado = None
     if colab_param:
@@ -286,16 +295,22 @@ if not df_todos.empty and "Nome" in df_todos.columns:
 st.markdown("<hr style='margin: 25px 0;'>", unsafe_allow_html=True)
 
 # =========================================================
-# MONITORAMENTO DE ALERTAS DE VENCIMENTO (DA UNIDADE NA SIDEBAR)
+# MONITORAMENTO DE ALERTAS DE VENCIMENTO
 # =========================================================
 try:
     df_unidade = load_data(UNIDADES[aba_nome])
+    
     if not df_unidade.empty and "Nome" in df_unidade.columns and "Venc" in df_unidade.columns:
         hoje = datetime.now()
         
+        # Converte a coluna de vencimento tratando formatos corrompidos
         df_unidade["Venc"] = pd.to_datetime(df_unidade["Venc"], dayfirst=True, errors="coerce")
         df_alertas = df_unidade.dropna(subset=["Venc", "Nome"]).copy()
-        df_alertas = df_alertas[df_alertas["Venc"].dt.year >= 2000]
+        
+        # Filtra datas fantasmas (ex.: 1899) e linhas com nome 'nan'
+        df_alertas = df_alertas[df_alertas["Nome"].astype(str).str.strip().str.lower() != "nan"]
+        df_alertas = df_alertas[df_alertas["Nome"].astype(str).str.strip() != ""]
+        df_alertas = df_alertas[df_alertas["Venc"].dt.year >= 2020]
         
         df_alertas["Dias"] = (df_alertas["Venc"] - hoje).dt.days
         alertas = df_alertas[df_alertas["Venc"] <= hoje + timedelta(days=10)].copy().sort_values(by="Venc")
@@ -321,33 +336,31 @@ try:
                     else ("#10b981", "#ecfdf5", f"✅ Vence em {dias} dias"))
                 )
 
-                nome_str = str(row["Nome"]).strip() if pd.notna(row["Nome"]) else "Não informado"
-                cargo_str = str(row["Cargo"]).strip() if pd.notna(row.get("Cargo")) else "Não informado"
-                setor_str = str(row["Setor"]).strip() if pd.notna(row.get("Setor")) else "Não informado"
+                nome_str = str(row["Nome"]).strip() if (pd.notna(row["Nome"]) and str(row["Nome"]).strip().lower() != "nan") else "Não informado"
+                cargo_str = str(row["Cargo"]).strip() if (pd.notna(row.get("Cargo")) and str(row.get("Cargo")).strip().lower() != "nan") else "Não informado"
+                setor_str = str(row["Setor"]).strip() if (pd.notna(row.get("Setor")) and str(row.get("Setor")).strip().lower() != "nan") else "Não informado"
                 venc_str = row["Venc"].strftime("%d/%m/%Y")
 
-                # Chave única para persistir o agendamento deste colaborador
-                chave_colab = f"{aba_nome}_{nome_str}"
-                dados_agendado = st.session_state.agendamentos_salvos.get(chave_colab, None)
+                # LÊ DIRETAMENTE A COLUNA 'Agendamento' DA FOLHA GOOGLE
+                info_agendamento = ""
+                if "Agendamento" in row.index and pd.notna(row["Agendamento"]):
+                    txt_ag = str(row["Agendamento"]).strip()
+                    if txt_ag and txt_ag.lower() != "nan":
+                        info_agendamento = txt_ag
 
-                # Montagem dinâmica do selo de agendado e observações no card
                 badge_html = ""
                 detalhes_agendamento_html = ""
-                if dados_agendado and dados_agendado.get("status"):
+                if info_agendamento:
                     badge_html = '<span style="background:#2563eb; color:white; padding:4px 10px; border-radius:8px; font-size:12px; font-weight:bold; margin-left:10px;">📌 AGENDADO</span>'
-                    dt_ag = dados_agendado.get("data", "")
-                    hr_ag = dados_agendado.get("hora", "")
-                    obs_ag = dados_agendado.get("obs", "")
                     detalhes_agendamento_html = f"""
-                    <div style="margin-top:10px; padding:8px 12px; background:#e0f2fe; border-radius:8px; color:#0369a1; font-size:13px;">
-                        🗓️ <b>Agendado para:</b> {dt_ag} às {hr_ag}<br>
-                        📝 <b>Obs:</b> {obs_ag if obs_ag else 'Nenhuma observação'}
+                    <div style="margin-top:10px; padding:10px 14px; background:#e0f2fe; border-radius:10px; color:#0369a1; font-size:13px; border:1px solid #bae6fd;">
+                        🗓️ <b>Agendamento:</b> {info_agendamento}
                     </div>
                     """
 
                 html_card = f"""
                 <div style="background:{fundo}; border-left:8px solid {cor}; border-radius:18px; padding:22px; margin-bottom:15px; box-shadow:0 4px 18px rgba(0,0,0,0.08); font-family:Arial;">
-                    <div style="font-size:22px; font-weight:700; color:#111827; margin-bottom:10px; display:flex; align-items:center;">
+                    <div style="font-size:22px; font-weight:700; color:#111827; margin-bottom:10px; display:flex; align-items:center; flex-wrap:wrap;">
                         {nome_str} {badge_html}
                     </div>
                     <div style="color:#475569; font-size:15px; line-height:1.8;">👔 <b>Cargo:</b> {cargo_str}<br>🏭 <b>Setor:</b> {setor_str}<br>📅 <b>Vencimento:</b> {venc_str}</div>
@@ -356,42 +369,20 @@ try:
                 </div>"""
 
                 with col:
-                    components.html(html_card, height=310 if dados_agendado and dados_agendado.get("status") else 250)
+                    altura_card = 310 if info_agendamento else 240
+                    components.html(html_card, height=altura_card)
+                    
                     partes_nome = nome_str.split()
                     primeiro_nome_card = partes_nome[0] if partes_nome else "Colaborador"
                     
-                    with st.expander(f"📄 Gerar / Gerenciar Agendamento - {primeiro_nome_card}"):
+                    with st.expander(f"📄 Formulário - {primeiro_nome_card}"):
                         tipo = st.selectbox("Tipo de Exame", ["PERIÓDICO", "MUDANÇA DE RISCO", "RETORNO"], key=f"t_{idx}")
-                        dt_s = st.date_input("Data sugerida", value=hoje + timedelta(days=2), key=f"d_{idx}")
+                        dt_s = st.date_input("Data sugerida para formulário", value=hoje + timedelta(days=2), key=f"d_{idx}")
                         btn_doc = gerar_docx(row, tipo, dt_s, aba_nome)
-                        st.download_button(label="📥 Baixar Documento", data=btn_doc, file_name=f"ASO_{nome_str}.docx", key=f"b_{idx}")
-                        
-                        st.markdown("---")
-                        st.markdown("##### 📌 Controle de Agendamento (Salva na Sessão)")
-                        
-                        # Controles de salvamento de agendamento, data, hora e observação
-                        marcar_como_agendado = st.checkbox("Marcar como Agendado", value=bool(dados_agendado and dados_agendado.get("status")), key=f"chk_ag_{idx}")
-                        
-                        val_data_padrao = datetime.strptime(dados_agendado["data"], "%d/%m/%Y").date() if (dados_agendado and dados_agendado.get("data")) else (hoje + timedelta(days=2)).date()
-                        data_ag_input = st.date_input("Data do Exame", value=val_data_padrao, key=f"dt_ag_{idx}")
-                        
-                        val_hora_padrao = dados_agendado.get("hora", "08:00") if dados_agendado else "08:00"
-                        hora_ag_input = st.text_input("Horário (ex: 09:30)", value=val_hora_padrao, key=f"hr_ag_{idx}")
-                        
-                        val_obs_padrao = dados_agendado.get("obs", "") if dados_agendado else ""
-                        obs_input = st.text_area("Observações (Clínica, guia, detalhes...)", value=val_obs_padrao, key=f"obs_ag_{idx}")
-                        
-                        if st.button("Salvar Agendamento", key=f"btn_salvar_ag_{idx}"):
-                            st.session_state.agendamentos_salvos[chave_colab] = {
-                                "status": marcar_como_agendado,
-                                "data": data_ag_input.strftime("%d/%m/%Y"),
-                                "hora": hora_ag_input,
-                                "obs": obs_input
-                            }
-                            st.success("Agendamento salvo com sucesso!")
-                            st.rerun()
+                        st.download_button(label="📥 Baixar Documento Word", data=btn_doc, file_name=f"ASO_{nome_str}.docx", key=f"b_{idx}")
     else:
-        st.warning(f"Nenhum dado encontrado ou planilha inacessível para a unidade {aba_nome}.")
+        if df_unidade.empty:
+            st.warning(f"Não há dados disponíveis no momento para a unidade {aba_nome}.")
 except Exception as e:
     st.error(f"Erro ao processar dados: {e}")
 

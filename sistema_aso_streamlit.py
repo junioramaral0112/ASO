@@ -130,13 +130,14 @@ section[data-testid="stSidebar"] .stButton > button {{
 
 SHEET_ID = "1G_oVT9gK-n_jGh5R4g65qUwK_MfQGvCX-SA4NHNNflU"
 
-# Unidades reais mapeadas diretamente das abas da sua planilha
+# As abas válidas confirmadas da folha.
+# Para ativar C-CHP ou D-SP, basta abrir a aba no navegador e colar o gid correspondente.
 UNIDADES = {
-    "C-CTBA": "145843404",
     "S-SJ": "1712391604",
+    "C-CTBA": "145843404",
     "D-MG": "1071212860",
-    "C-CHP": "1549718037",  # Substitua caso o gid desta aba na URL seja outro
-    "D-SP": "0"             # D-SP (aba inicial geralmente tem gid 0)
+    # "C-CHP": "COLE_O_GID_AQUI",
+    # "D-SP": "COLE_O_GID_AQUI"
 }
 
 @st.cache_data(ttl=60)
@@ -149,7 +150,7 @@ def load_data(gid):
             
         df.columns = df.columns.astype(str).str.strip()
         
-        # 1. Filtro estrito: remove qualquer linha sem nome ou onde Nome seja NaN
+        # Elimina linhas em branco ou valores nulos na coluna Nome
         if "Nome" in df.columns:
             df = df.dropna(subset=["Nome"]).copy()
             df["Nome"] = df["Nome"].astype(str).str.strip()
@@ -158,14 +159,8 @@ def load_data(gid):
             df = df[df["Nome"].str.lower() != "none"]
             
         return df
-    except urllib.error.HTTPError as e:
-        if e.code == 400:
-            st.error(f"❌ A aba com GID `{gid}` deu erro 400. Verifique se o gid da aba na folha online é este número.")
-        else:
-            st.error(f"Erro HTTP {e.code} ao descarregar dados da folha.")
-        return pd.DataFrame()
-    except Exception as ex:
-        st.warning(f"Erro ao ler GID {gid}: {ex}")
+    except Exception:
+        # Retorna DataFrame vazio sem poluir a interface em caso de GID pendente
         return pd.DataFrame()
 
 @st.cache_data(ttl=60)
@@ -310,17 +305,15 @@ try:
     if not df_unidade.empty and "Nome" in df_unidade.columns and "Venc" in df_unidade.columns:
         hoje = datetime.now()
         
-        # Converte a coluna de data tratando erros
+        # Converte as datas
         df_unidade["Venc"] = pd.to_datetime(df_unidade["Venc"], dayfirst=True, errors="coerce")
         df_alertas = df_unidade.dropna(subset=["Venc", "Nome"]).copy()
         
-        # FILTRO DEFENSIVO CONTRA LINHAS VAZIAS E 1899
+        # Filtros de segurança contra linhas em branco e anos inválidos (ex: 1899)
         df_alertas["Nome_Limpo"] = df_alertas["Nome"].astype(str).str.strip()
         df_alertas = df_alertas[df_alertas["Nome_Limpo"] != ""]
         df_alertas = df_alertas[df_alertas["Nome_Limpo"].str.lower() != "nan"]
         df_alertas = df_alertas[df_alertas["Nome_Limpo"].str.lower() != "none"]
-        
-        # Ignora datas residuais de fórmulas vazias (como 1899 ou 1900)
         df_alertas = df_alertas[df_alertas["Venc"].dt.year >= 2020]
         
         df_alertas["Dias"] = (df_alertas["Venc"] - hoje).dt.days
@@ -352,7 +345,7 @@ try:
                 setor_str = str(row.get("Setor", "Não informado")) if pd.notna(row.get("Setor")) and str(row.get("Setor")).strip() != "" else "Não informado"
                 venc_str = row["Venc"].strftime("%d/%m/%Y")
 
-                # Leitura da coluna de Agendamento da folha
+                # Leitura da coluna de Agendamento vinda da folha
                 info_agendamento = ""
                 if "Agendamento" in row.index and pd.notna(row["Agendamento"]):
                     txt_ag = str(row["Agendamento"]).strip()

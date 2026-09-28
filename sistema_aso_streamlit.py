@@ -9,7 +9,6 @@ from io import BytesIO
 import os
 import json
 import urllib.request
-import urllib.error
 from PIL import Image
 import base64
 import unicodedata
@@ -45,7 +44,7 @@ def normalizar_texto(texto):
     return texto.strip().upper()
 
 # =========================================================
-# PERSISTÊNCIA DOS AGENDAMENTOS EM ARQUIVO (NÃO SOME COM F5)
+# GRAVAÇÃO E PERSISTÊNCIA DOS AGENDAMENTOS
 # =========================================================
 
 def ler_banco_agendamentos():
@@ -149,15 +148,18 @@ section[data-testid="stSidebar"] .stButton > button {{
 """, unsafe_allow_html=True)
 
 # =========================================================
-# LÓGICA DE DADOS
+# LÓGICA DE DADOS (TODAS AS UNIDADES MANTIDAS)
 # =========================================================
 
 SHEET_ID = "1G_oVT9gK-n_jGh5R4g65qUwK_MfQGvCX-SA4NHNNflU"
 
 UNIDADES = {
     "S-SJ": "1712391604",
-    "C-CTBA": "145843404",
-    "D-MG": "1071212860"
+    "J-CTBA": "145843404",
+    "D-MG": "1071212860",
+    "D-ITU": "1323067532",
+    "J-CHP": "1549718037",
+    "D-SP": "0"
 }
 
 @st.cache_data(ttl=60)
@@ -170,6 +172,7 @@ def load_data(gid):
             
         df.columns = df.columns.astype(str).str.strip()
         
+        # Filtra linhas vazias ou sem nome
         if "Nome" in df.columns:
             df = df.dropna(subset=["Nome"]).copy()
             df["Nome"] = df["Nome"].astype(str).str.strip()
@@ -179,6 +182,7 @@ def load_data(gid):
             
         return df
     except Exception:
+        # Retorna DataFrame vazio sem quebrar as outras unidades
         return pd.DataFrame()
 
 @st.cache_data(ttl=60)
@@ -326,6 +330,7 @@ try:
         df_unidade["Venc"] = pd.to_datetime(df_unidade["Venc"], dayfirst=True, errors="coerce")
         df_alertas = df_unidade.dropna(subset=["Venc", "Nome"]).copy()
         
+        # Filtro estrito para eliminar 'nan' e datas fantasmas de 1899
         df_alertas["Nome_Limpo"] = df_alertas["Nome"].astype(str).str.strip()
         df_alertas = df_alertas[df_alertas["Nome_Limpo"] != ""]
         df_alertas = df_alertas[df_alertas["Nome_Limpo"].str.lower() != "nan"]
@@ -366,7 +371,7 @@ try:
                 chave_registro = f"{aba_nome}_{nome_str}"
                 dados_locais = banco_ag.get(chave_registro, None)
 
-                # Prioridade de exibição: Local (app) ou Planilha
+                # Prioridade: 1) Marcado no aplicativo | 2) Vindo da folha de cálculo
                 agendado_ativo = False
                 texto_detalhe_agendamento = ""
                 
@@ -413,10 +418,10 @@ try:
                     partes_nome = nome_str.split()
                     primeiro_nome_card = partes_nome[0] if len(partes_nome) > 0 else "Colaborador"
                     
-                    with st.expander(f"⚙️ Gerar Agendamento - {primeiro_nome_card}"):
+                    with st.expander(f"⚙️ Gerar Agendamento / Guia - {primeiro_nome_card}"):
                         tipo = st.selectbox("Tipo de Exame", ["PERIÓDICO", "MUDANÇA DE RISCO", "RETORNO"], key=f"t_{idx}")
                         
-                        # Data sugerida (que é a mesma data do agendamento)
+                        # Data sugerida que será a data do agendamento
                         padrao_data = (hoje + timedelta(days=2)).date()
                         if dados_locais and dados_locais.get("data"):
                             try:
@@ -428,16 +433,16 @@ try:
                         
                         # Horário e observações
                         padrao_hora = dados_locais.get("hora", "08:00") if dados_locais else "08:00"
-                        hora_input = st.text_input("⏰ Horário do Exame (ex: 08:30)", value=padrao_hora, key=f"hr_{chave_registro}_{idx}")
+                        hora_input = st.text_input("⏰ Horário (ex: 08:30)", value=padrao_hora, key=f"hr_{chave_registro}_{idx}")
                         
                         padrao_obs = dados_locais.get("obs", "") if dados_locais else (str(row.get("Agendamento", "")) if pd.notna(row.get("Agendamento")) and str(row.get("Agendamento")).lower() not in ["nan", "none"] else "")
                         obs_input = st.text_area("📝 Observações (Clínica, médico, detalhes...)", value=padrao_obs, key=f"obs_{chave_registro}_{idx}")
 
-                        # Opção para desmarcar se for necessário
+                        # Checkbox para controle manual do status
                         check_agendado = st.checkbox("Status: AGENDADO", value=agendado_ativo, key=f"chk_{chave_registro}_{idx}")
 
-                        # Callback: ao clicar no download, salva como AGENDADO automaticamente!
-                        def marcar_como_agendado_ao_baixar(chave=chave_registro, data_val=dt_sugestao, hora_val=hora_input, obs_val=obs_input):
+                        # Função disparada automaticamente ao clicar no download
+                        def salvar_e_agendar(chave=chave_registro, data_val=dt_sugestao, hora_val=hora_input, obs_val=obs_input):
                             gravar_agendamento(chave, {
                                 "status": True,
                                 "data": data_val.strftime("%d/%m/%Y"),
@@ -447,23 +452,24 @@ try:
 
                         btn_doc = gerar_docx(row, tipo, dt_sugestao, aba_nome)
                         
+                        # Botão de download que já marca como AGENDADO
                         st.download_button(
                             label="📥 Baixar Documento e Marcar como Agendado",
                             data=btn_doc,
                             file_name=f"ASO_{nome_str}.docx",
                             key=f"b_{idx}",
-                            on_click=marcar_como_agendado_ao_baixar
+                            on_click=salvar_e_agendar
                         )
 
-                        # Botão manual adicional caso queira salvar alterações sem descarregar o Word
-                        if st.button("💾 Salvar Alterações", key=f"btn_salvar_{chave_registro}_{idx}"):
+                        # Botão alternativo caso queira salvar sem baixar o arquivo
+                        if st.button("💾 Apenas Salvar Status", key=f"btn_salvar_{chave_registro}_{idx}"):
                             gravar_agendamento(chave_registro, {
                                 "status": check_agendado,
                                 "data": dt_sugestao.strftime("%d/%m/%Y"),
                                 "hora": hora_input.strip(),
                                 "obs": obs_input.strip()
                             })
-                            st.toast("✅ Informações salvas com sucesso!")
+                            st.toast("✅ Alterações salvas!")
                             st.rerun()
     else:
         st.warning(f"Sem dados carregados para a unidade {aba_nome}.")

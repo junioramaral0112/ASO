@@ -21,7 +21,7 @@ from urllib.parse import unquote
 BASE_DIR = os.path.dirname(__file__) if "__file__" in locals() else "."
 
 # Cole aqui a URL gerada no botão Implantar do Apps Script
-APPS_SCRIPT_WEBHOOK_URL = "https://script.google.com/a/macros/macromaq.com.br/s/AKfycbyNCchIjNTiUna4cWlyDOJr8KYqpYDBdNqormPb91d_xYnOu7L1lxrZDAL4q0I2lwux/exec"
+APPS_SCRIPT_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbyk15PBmkDu0RCWks7M-3GDYApklXB0UeFjJahZeBwhcB8X-m37KTUz5Ry1NGJA2nY/exec"
 
 def localizar_arquivo(caminho_local, nome_arquivo):
     if os.path.exists(caminho_local):

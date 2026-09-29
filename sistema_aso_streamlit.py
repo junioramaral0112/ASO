@@ -69,7 +69,7 @@ def gravar_agendamento(chave, dados):
         st.error(f"Erro ao salvar localmente: {e}")
 
 def enviar_webhook_planilha(payload):
-    """Envia a alteração diretamente para o script doPost da folha."""
+    """Envia alteração para o script doPost da planilha Google."""
     if not APPS_SCRIPT_WEBHOOK_URL or not APPS_SCRIPT_WEBHOOK_URL.startswith("http"):
         return
     try:
@@ -260,11 +260,15 @@ def gerar_docx(dados, tipo, data_sugestao, unidade_padrao="MACROMAQ"):
     return target.getvalue()
 
 def renderizar_card_e_agendamento(row, unidade_nome, idx_chave, banco_ag, hoje):
-    """Renderiza cada ASO de forma independente evitando marcações duplicadas."""
+    """Renderiza o ASO independente e permite alterar a Data ASO da Coluna H."""
     nome_str = str(row["Nome"]).strip()
     cargo_str = str(row.get("Cargo", "Não informado")) if pd.notna(row.get("Cargo")) and str(row.get("Cargo")).strip() != "" else "Não informado"
     setor_str = str(row.get("Setor", "Não informado")) if pd.notna(row.get("Setor")) and str(row.get("Setor")).strip() != "" else "Não informado"
     
+    # Tratamento da Data do ASO Atual (Coluna H)
+    data_aso_val = str(row.get("Data ASO", "")).strip()
+    
+    # Tratamento da Data de Vencimento (Coluna I)
     venc_dt = pd.to_datetime(row.get("Venc"), dayfirst=True, errors="coerce")
     if pd.notna(venc_dt):
         dias = int((venc_dt - hoje).days)
@@ -273,7 +277,7 @@ def renderizar_card_e_agendamento(row, unidade_nome, idx_chave, banco_ag, hoje):
         dias = 9999
         venc_str = "Não informada"
 
-    # CHAVE ÚNICA EXCLUSIVA: Nome + Vencimento original
+    # Chave única por ASO (Nome + Vencimento)
     chave_registro = f"{unidade_nome}_{nome_str}_{venc_str.replace('/', '-')}"
     dados_locais = banco_ag.get(chave_registro, None)
 
@@ -286,7 +290,7 @@ def renderizar_card_e_agendamento(row, unidade_nome, idx_chave, banco_ag, hoje):
         hora_salva = dados_locais.get("hora", "")
         obs_salva = dados_locais.get("obs", "")
         if agendado_ativo:
-            texto_detalhe_agendamento = f"🗓️️ <b>Agendado:</b> {data_salva}" + (f" às {hora_salva}" if hora_salva else "")
+            texto_detalhe_agendamento = f"🗓 <b>Agendado:</b> {data_salva}" + (f" às {hora_salva}" if hora_salva else "")
             if obs_salva:
                 texto_detalhe_agendamento += f"<br>📝 <b>Obs:</b> {obs_salva}"
     else:
@@ -317,18 +321,25 @@ def renderizar_card_e_agendamento(row, unidade_nome, idx_chave, banco_ag, hoje):
         <div style="font-size:22px; font-weight:700; color:#111827; margin-bottom:10px; display:flex; align-items:center; flex-wrap:wrap;">
             {nome_str} {badge_html}
         </div>
-        <div style="color:#475569; font-size:15px; line-height:1.8;">👔 <b>Cargo:</b> {cargo_str}<br>🏭 <b>Setor:</b> {setor_str}<br>📅 <b>Vencimento:</b> {venc_str}</div>
+        <div style="color:#475569; font-size:15px; line-height:1.8;">
+            👔 <b>Cargo:</b> {cargo_str}<br>
+            🏭 <b>Setor:</b> {setor_str}<br>
+            🩺 <b>Data ASO (Col. H):</b> {data_aso_val if data_aso_val else 'Não informada'}<br>
+            📅 <b>Vencimento (Col. I):</b> {venc_str}
+        </div>
         {detalhes_html}
         <div style="margin-top:15px; font-size:16px; font-weight:bold; color:{cor};">{status}</div>
     </div>"""
 
-    altura_card = 310 if agendado_ativo else 240
+    altura_card = 330 if agendado_ativo else 260
     components.html(html_card, height=altura_card)
 
     partes_nome = nome_str.split()
     primeiro_nome_card = partes_nome[0] if len(partes_nome) > 0 else "Colaborador"
 
-    with st.expander(f"⚙️ Gerenciar Agendamento / Guia - {primeiro_nome_card} ({venc_str})"):
+    tab_agendamento, tab_atualizar_h = st.tabs([f"⚙️ Agendar / Emitir Guia", f"🔄 Atualizar Data do ASO (Col. H)"])
+
+    with tab_agendamento:
         tipo = st.selectbox("Tipo de Exame", ["PERIÓDICO", "MUDANÇA DE RISCO", "RETORNO"], key=f"t_{idx_chave}")
 
         padrao_data = (hoje + timedelta(days=2)).date()
@@ -356,10 +367,7 @@ def renderizar_card_e_agendamento(row, unidade_nome, idx_chave, banco_ag, hoje):
             }
             gravar_agendamento(chave, dados_salvar)
             
-            # Formata a string para a coluna M da folha
             txt_status_planilha = f"{data_val.strftime('%d/%m/%Y')} às {hora_val.strip()}" + (f" - {obs_val.strip()}" if obs_val.strip() else "")
-            
-            # Envia diretamente para o seu script doPost
             enviar_webhook_planilha({
                 "aba": unidade_nome,
                 "nome": nome_str,
@@ -382,7 +390,7 @@ def renderizar_card_e_agendamento(row, unidade_nome, idx_chave, banco_ag, hoje):
         with c_salvar:
             if st.button("💾 Apenas Salvar Status", key=f"btn_salvar_{idx_chave}"):
                 salvar_e_agendar()
-                st.toast("✅ Agendamento salvo e sincronizado!")
+                st.toast("✅ Agendamento salvo!")
                 st.rerun()
 
         with c_limpar:
@@ -397,31 +405,29 @@ def renderizar_card_e_agendamento(row, unidade_nome, idx_chave, banco_ag, hoje):
                     st.toast("🗑️ Agendamento removido!")
                     st.rerun()
 
-        # =========================================================
-        # SEÇÃO: ATUALIZAR REALIZAÇÃO E NOVO VENCIMENTO NA FOLHA
-        # =========================================================
-        st.markdown("---")
-        st.markdown("##### 🔄 Concluir Exame e Atualizar Vencimento")
-        st.caption("Ao preencher abaixo, a nova data do ASO e o novo vencimento serão gravados diretamente na folha de cálculo.")
+    # =========================================================
+    # ABA NOVA: ALTERAR A DATA DA COLUNA H (DATA ASO) NA PLANILHA
+    # =========================================================
+    with tab_atualizar_h:
+        st.markdown(f"**Alterar 'Data ASO' de {primeiro_nome_card}**")
+        st.caption("Esta nova data será gravada diretamente na **Coluna H**, e a planilha recalculará o vencimento automaticamente na Coluna I.")
 
-        c_aso, c_venc = st.columns(2)
-        with c_aso:
-            nova_data_aso = st.date_input("Data de Realização do ASO", value=hoje.date(), key=f"dt_aso_nova_{idx_chave}")
-        with c_venc:
-            novo_vencimento = st.date_input("Nova Data de Vencimento", value=(nova_data_aso + timedelta(days=365)), key=f"dt_venc_nova_{idx_chave}")
+        nova_data_coluna_h = st.date_input("Nova Data do ASO (Coluna H)", value=hoje.date(), key=f"dt_col_h_{idx_chave}")
 
-        if st.button("✅ Gravar Novo Vencimento na Planilha", key=f"btn_atualizar_venc_{idx_chave}"):
-            remover_agendamento(chave_registro) # Remove o status temporário
+        if st.button("💾 Gravar Nova Data na Coluna H", key=f"btn_gravar_h_{idx_chave}"):
+            # Remove o status de agendado localmente (pois o ASO foi feito)
+            remover_agendamento(chave_registro)
+            
+            # Envia para a planilha atualizar a coluna H e limpar a coluna M
             enviar_webhook_planilha({
                 "aba": unidade_nome,
                 "nome": nome_str,
                 "venc_original": venc_str,
-                "nova_data_aso": nova_data_aso.strftime("%d/%m/%Y"),
-                "novo_vencimento": novo_vencimento.strftime("%d/%m/%Y"),
-                "acao": "atualizar_aso"
+                "nova_data_aso": nova_data_coluna_h.strftime("%d/%m/%Y"),
+                "acao": "atualizar_data_aso"
             })
-            st.cache_data.clear() # Limpa cache da folha para puxar as novas datas
-            st.success("✅ Exame concluído! Nova data gravada na folha com sucesso.")
+            st.cache_data.clear()
+            st.success(f"✅ Data {nova_data_coluna_h.strftime('%d/%m/%Y')} gravada na Coluna H com sucesso!")
             st.rerun()
 
 # =========================================================
@@ -526,7 +532,7 @@ try:
         
         df_base["Dias"] = (df_base["Venc"] - hoje).dt.days
 
-        # Identifica agendamentos respeitando o par (Nome + Vencimento)
+        # Identifica agendamentos respeitando Nome + Vencimento
         def esta_agendado_check(row):
             v_s = row["Venc"].strftime("%d-%m-%Y")
             chave = f"{aba_nome}_{row['Nome']}_{v_s}"

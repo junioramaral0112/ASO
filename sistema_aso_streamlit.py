@@ -20,7 +20,7 @@ from urllib.parse import unquote
 
 BASE_DIR = os.path.dirname(__file__) if "__file__" in locals() else "."
 
-# Cole aqui o link da sua Web App do Google Apps Script
+# Cole aqui a URL gerada no botão Implantar do Apps Script
 APPS_SCRIPT_WEBHOOK_URL = "" 
 
 def localizar_arquivo(caminho_local, nome_arquivo):
@@ -47,7 +47,7 @@ def normalizar_texto(texto):
     return texto.strip().upper()
 
 # =========================================================
-# PERSISTÊNCIA LOCAL E ENVIO PARA O GOOGLE APPS SCRIPT
+# PERSISTÊNCIA LOCAL E ENVIO COM TRATAMENTO DE REDIRECIONAMENTO
 # =========================================================
 
 def ler_banco_agendamentos():
@@ -69,15 +69,26 @@ def gravar_agendamento(chave, dados):
         st.error(f"Erro ao salvar localmente: {e}")
 
 def enviar_webhook_planilha(payload):
-    """Envia alteração para o script doPost da planilha Google."""
+    """Envia requisição para o Google Apps Script e trata o redirecionamento."""
     if not APPS_SCRIPT_WEBHOOK_URL or not APPS_SCRIPT_WEBHOOK_URL.startswith("http"):
-        return
+        return {"status": "erro", "mensagem": "URL do Apps Script não preenchida em APPS_SCRIPT_WEBHOOK_URL"}
     try:
         dados_json = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(APPS_SCRIPT_WEBHOOK_URL, data=dados_json, headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=8)
-    except Exception:
-        pass
+        req = urllib.request.Request(
+            APPS_SCRIPT_WEBHOOK_URL, 
+            data=dados_json, 
+            headers={"Content-Type": "application/json"}
+        )
+        # O opener padrão segue redirecionamentos 302 do Google
+        opener = urllib.request.build_opener()
+        with opener.open(req, timeout=12) as response:
+            res_text = response.read().decode("utf-8")
+            try:
+                return json.loads(res_text)
+            except Exception:
+                return {"status": "sucesso"}
+    except Exception as ex:
+        return {"status": "erro", "mensagem": str(ex)}
 
 def remover_agendamento(chave, payload_sync=None):
     banco = ler_banco_agendamentos()
@@ -173,21 +184,22 @@ section[data-testid="stSidebar"] .stButton > button {{
 """, unsafe_allow_html=True)
 
 # =========================================================
-# LÓGICA DE DADOS
+# LÓGICA DE DADOS (NOMES SINCRONIZADOS COM A PLANILHA)
 # =========================================================
 
 SHEET_ID = "1G_oVT9gK-n_jGh5R4g65qUwK_MfQGvCX-SA4NHNNflU"
 
+# Nomes exatos das abas da planilha
 UNIDADES = {
+    "C-CTBA": "145843404",
     "S-SJ": "1712391604",
-    "J-CTBA": "145843404",
     "D-MG": "1071212860",
     "D-ITU": "1323067532",
-    "J-CHP": "1549718037",
+    "C-CHP": "1549718037",
     "D-SP": "0"
 }
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=15)
 def load_data(gid):
     url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={str(gid).strip()}"
     try:
@@ -208,7 +220,7 @@ def load_data(gid):
     except Exception:
         return pd.DataFrame()
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=15)
 def carregar_base_completa():
     frames = []
     for u_nome, gid in UNIDADES.items():
@@ -260,15 +272,12 @@ def gerar_docx(dados, tipo, data_sugestao, unidade_padrao="MACROMAQ"):
     return target.getvalue()
 
 def renderizar_card_e_agendamento(row, unidade_nome, idx_chave, banco_ag, hoje):
-    """Renderiza o ASO independente e permite alterar a Data ASO da Coluna H."""
     nome_str = str(row["Nome"]).strip()
     cargo_str = str(row.get("Cargo", "Não informado")) if pd.notna(row.get("Cargo")) and str(row.get("Cargo")).strip() != "" else "Não informado"
     setor_str = str(row.get("Setor", "Não informado")) if pd.notna(row.get("Setor")) and str(row.get("Setor")).strip() != "" else "Não informado"
     
-    # Tratamento da Data do ASO Atual (Coluna H)
     data_aso_val = str(row.get("Data ASO", "")).strip()
     
-    # Tratamento da Data de Vencimento (Coluna I)
     venc_dt = pd.to_datetime(row.get("Venc"), dayfirst=True, errors="coerce")
     if pd.notna(venc_dt):
         dias = int((venc_dt - hoje).days)
@@ -277,7 +286,6 @@ def renderizar_card_e_agendamento(row, unidade_nome, idx_chave, banco_ag, hoje):
         dias = 9999
         venc_str = "Não informada"
 
-    # Chave única por ASO (Nome + Vencimento)
     chave_registro = f"{unidade_nome}_{nome_str}_{venc_str.replace('/', '-')}"
     dados_locais = banco_ag.get(chave_registro, None)
 
@@ -405,9 +413,6 @@ def renderizar_card_e_agendamento(row, unidade_nome, idx_chave, banco_ag, hoje):
                     st.toast("🗑️ Agendamento removido!")
                     st.rerun()
 
-    # =========================================================
-    # ABA NOVA: ALTERAR A DATA DA COLUNA H (DATA ASO) NA PLANILHA
-    # =========================================================
     with tab_atualizar_h:
         st.markdown(f"**Alterar 'Data ASO' de {primeiro_nome_card}**")
         st.caption("Esta nova data será gravada diretamente na **Coluna H**, e a planilha recalculará o vencimento automaticamente na Coluna I.")
@@ -415,20 +420,22 @@ def renderizar_card_e_agendamento(row, unidade_nome, idx_chave, banco_ag, hoje):
         nova_data_coluna_h = st.date_input("Nova Data do ASO (Coluna H)", value=hoje.date(), key=f"dt_col_h_{idx_chave}")
 
         if st.button("💾 Gravar Nova Data na Coluna H", key=f"btn_gravar_h_{idx_chave}"):
-            # Remove o status de agendado localmente (pois o ASO foi feito)
             remover_agendamento(chave_registro)
             
-            # Envia para a planilha atualizar a coluna H e limpar a coluna M
-            enviar_webhook_planilha({
+            resp = enviar_webhook_planilha({
                 "aba": unidade_nome,
                 "nome": nome_str,
                 "venc_original": venc_str,
                 "nova_data_aso": nova_data_coluna_h.strftime("%d/%m/%Y"),
                 "acao": "atualizar_data_aso"
             })
-            st.cache_data.clear()
-            st.success(f"✅ Data {nova_data_coluna_h.strftime('%d/%m/%Y')} gravada na Coluna H com sucesso!")
-            st.rerun()
+            
+            if resp.get("status") == "erro":
+                st.error(f"Erro da Planilha: {resp.get('mensagem')}")
+            else:
+                st.cache_data.clear()
+                st.success(f"✅ Data {nova_data_coluna_h.strftime('%d/%m/%Y')} gravada com sucesso!")
+                st.rerun()
 
 # =========================================================
 # SIDEBAR
@@ -523,7 +530,6 @@ try:
         df_unidade["Venc"] = pd.to_datetime(df_unidade["Venc"], dayfirst=True, errors="coerce")
         df_base = df_unidade.dropna(subset=["Venc", "Nome"]).copy()
         
-        # Filtros de higienização
         df_base["Nome"] = df_base["Nome"].astype(str).str.strip()
         df_base = df_base[df_base["Nome"] != ""]
         df_base = df_base[df_base["Nome"].str.lower() != "nan"]
@@ -532,7 +538,6 @@ try:
         
         df_base["Dias"] = (df_base["Venc"] - hoje).dt.days
 
-        # Identifica agendamentos respeitando Nome + Vencimento
         def esta_agendado_check(row):
             v_s = row["Venc"].strftime("%d-%m-%Y")
             chave = f"{aba_nome}_{row['Nome']}_{v_s}"

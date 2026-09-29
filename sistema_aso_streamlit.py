@@ -21,7 +21,7 @@ from urllib.parse import unquote
 BASE_DIR = os.path.dirname(__file__) if "__file__" in locals() else "."
 
 # Cole aqui a URL gerada no botão Implantar do Apps Script
-APPS_SCRIPT_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbyk15PBmkDu0RCWks7M-3GDYApklXB0UeFjJahZeBwhcB8X-m37KTUz5Ry1NGJA2nY/exec"
+APPS_SCRIPT_WEBHOOK_URL = "https://script.google.com/a/macros/macromaq.com.br/s/AKfycbyNCchIjNTiUna4cWlyDOJr8KYqpYDBdNqormPb91d_xYnOu7L1lxrZDAL4q0I2lwux/exec"
 
 def localizar_arquivo(caminho_local, nome_arquivo):
     if os.path.exists(caminho_local):
@@ -47,7 +47,7 @@ def normalizar_texto(texto):
     return texto.strip().upper()
 
 # =========================================================
-# PERSISTÊNCIA LOCAL E ENVIO COM TRATAMENTO DE REDIRECIONAMENTO
+# PERSISTÊNCIA LOCAL E ENVIO DE DADOS
 # =========================================================
 
 def ler_banco_agendamentos():
@@ -79,7 +79,6 @@ def enviar_webhook_planilha(payload):
             data=dados_json, 
             headers={"Content-Type": "application/json"}
         )
-        # O opener padrão segue redirecionamentos 302 do Google
         opener = urllib.request.build_opener()
         with opener.open(req, timeout=12) as response:
             res_text = response.read().decode("utf-8")
@@ -184,19 +183,19 @@ section[data-testid="stSidebar"] .stButton > button {{
 """, unsafe_allow_html=True)
 
 # =========================================================
-# LÓGICA DE DADOS (NOMES SINCRONIZADOS COM A PLANILHA)
+# LÓGICA DE DADOS (ABAS EXATAS DA PLANILHA)
 # =========================================================
 
 SHEET_ID = "1G_oVT9gK-n_jGh5R4g65qUwK_MfQGvCX-SA4NHNNflU"
 
-# Nomes exatos das abas da planilha
+# GIDs atualizados conforme a sua planilha real
 UNIDADES = {
-    "C-CTBA": "145843404",
-    "S-SJ": "1712391604",
-    "D-MG": "1071212860",
-    "D-ITU": "1323067532",
-    "C-CHP": "1549718037",
-    "D-SP": "0"
+    "C-CHP": "1201656811",  # GID atualizado de Chapecó extraído da imagem
+    "C-CTBA": "145843404",   # Curitiba
+    "S-SJ": "1712391604",    # São José
+    "D-MG": "1071212860",    # Minas Gerais
+    "D-MS": "2059345229",    # Mato Grosso do Sul (se for diferente, coloque o gid da URL de D-MS)
+    "D-SP": "0"              # São Paulo
 }
 
 @st.cache_data(ttl=15)
@@ -438,7 +437,7 @@ def renderizar_card_e_agendamento(row, unidade_nome, idx_chave, banco_ag, hoje):
                 st.rerun()
 
 # =========================================================
-# SIDEBAR
+# SIDEBAR COM AS ABAS REAIS DA PLANILHA
 # =========================================================
 
 if PATH_LOGO and os.path.exists(PATH_LOGO):

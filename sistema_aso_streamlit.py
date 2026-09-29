@@ -15,10 +15,13 @@ import unicodedata
 from urllib.parse import unquote
 
 # =========================================================
-# CONFIGURAÇÃO DE CAMINHOS DINÂMICOS
+# CONFIGURAÇÃO DE CAMINHOS E WEBHOOK DO APPS SCRIPT
 # =========================================================
 
 BASE_DIR = os.path.dirname(__file__) if "__file__" in locals() else "."
+
+# Cole aqui o link da sua Web App do Google Apps Script
+APPS_SCRIPT_WEBHOOK_URL = "" 
 
 def localizar_arquivo(caminho_local, nome_arquivo):
     if os.path.exists(caminho_local):
@@ -44,7 +47,7 @@ def normalizar_texto(texto):
     return texto.strip().upper()
 
 # =========================================================
-# GRAVAÇÃO E PERSISTÊNCIA DOS AGENDAMENTOS
+# PERSISTÊNCIA LOCAL E ENVIO PARA O GOOGLE APPS SCRIPT
 # =========================================================
 
 def ler_banco_agendamentos():
@@ -65,7 +68,18 @@ def gravar_agendamento(chave, dados):
     except Exception as e:
         st.error(f"Erro ao salvar localmente: {e}")
 
-def remover_agendamento(chave):
+def enviar_webhook_planilha(payload):
+    """Envia a alteração diretamente para o script doPost da folha."""
+    if not APPS_SCRIPT_WEBHOOK_URL or not APPS_SCRIPT_WEBHOOK_URL.startswith("http"):
+        return
+    try:
+        dados_json = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(APPS_SCRIPT_WEBHOOK_URL, data=dados_json, headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=8)
+    except Exception:
+        pass
+
+def remover_agendamento(chave, payload_sync=None):
     banco = ler_banco_agendamentos()
     banco[chave] = {"status": False, "data": "", "hora": "", "obs": ""}
     try:
@@ -73,6 +87,8 @@ def remover_agendamento(chave):
             json.dump(banco, f, ensure_ascii=False, indent=2)
     except Exception as e:
         st.error(f"Erro ao atualizar: {e}")
+    if payload_sync:
+        enviar_webhook_planilha(payload_sync)
 
 # =========================================================
 # CONFIGURAÇÃO DA PÁGINA
@@ -171,7 +187,7 @@ UNIDADES = {
     "D-SP": "0"
 }
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=30)
 def load_data(gid):
     url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={str(gid).strip()}"
     try:
@@ -192,7 +208,7 @@ def load_data(gid):
     except Exception:
         return pd.DataFrame()
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=30)
 def carregar_base_completa():
     frames = []
     for u_nome, gid in UNIDADES.items():
@@ -244,12 +260,11 @@ def gerar_docx(dados, tipo, data_sugestao, unidade_padrao="MACROMAQ"):
     return target.getvalue()
 
 def renderizar_card_e_agendamento(row, unidade_nome, idx_chave, banco_ag, hoje):
-    """Função reutilizável para desenhar o card + expander de agendamento em qualquer parte."""
+    """Renderiza cada ASO de forma independente evitando marcações duplicadas."""
     nome_str = str(row["Nome"]).strip()
     cargo_str = str(row.get("Cargo", "Não informado")) if pd.notna(row.get("Cargo")) and str(row.get("Cargo")).strip() != "" else "Não informado"
     setor_str = str(row.get("Setor", "Não informado")) if pd.notna(row.get("Setor")) and str(row.get("Setor")).strip() != "" else "Não informado"
     
-    # Tratamento de data de vencimento
     venc_dt = pd.to_datetime(row.get("Venc"), dayfirst=True, errors="coerce")
     if pd.notna(venc_dt):
         dias = int((venc_dt - hoje).days)
@@ -258,13 +273,8 @@ def renderizar_card_e_agendamento(row, unidade_nome, idx_chave, banco_ag, hoje):
         dias = 9999
         venc_str = "Não informada"
 
-    cor, fundo, status = (
-        ("#ef4444", "#fff1f2", "🚨 ASO VENCIDO") if dias < 0 
-        else (("#f59e0b", "#fff7ed", f"⚠️ Vence em {dias} dias") if dias <= 3 
-        else ("#10b981", "#ecfdf5", f"✅ Vence em {dias} dias"))
-    )
-
-    chave_registro = f"{unidade_nome}_{nome_str}"
+    # CHAVE ÚNICA EXCLUSIVA: Nome + Vencimento original
+    chave_registro = f"{unidade_nome}_{nome_str}_{venc_str.replace('/', '-')}"
     dados_locais = banco_ag.get(chave_registro, None)
 
     agendado_ativo = False
@@ -276,7 +286,7 @@ def renderizar_card_e_agendamento(row, unidade_nome, idx_chave, banco_ag, hoje):
         hora_salva = dados_locais.get("hora", "")
         obs_salva = dados_locais.get("obs", "")
         if agendado_ativo:
-            texto_detalhe_agendamento = f"🗓️ <b>Agendado:</b> {data_salva}" + (f" às {hora_salva}" if hora_salva else "")
+            texto_detalhe_agendamento = f"🗓️️ <b>Agendado:</b> {data_salva}" + (f" às {hora_salva}" if hora_salva else "")
             if obs_salva:
                 texto_detalhe_agendamento += f"<br>📝 <b>Obs:</b> {obs_salva}"
     else:
@@ -285,6 +295,12 @@ def renderizar_card_e_agendamento(row, unidade_nome, idx_chave, banco_ag, hoje):
             if txt_planilha and txt_planilha.lower() not in ["nan", "none"]:
                 agendado_ativo = True
                 texto_detalhe_agendamento = f"🗓️ <b>Agendado:</b> {txt_planilha}"
+
+    cor, fundo, status = (
+        ("#ef4444", "#fff1f2", "🚨 ASO VENCIDO") if dias < 0 
+        else (("#f59e0b", "#fff7ed", f"⚠️ Vence em {dias} dias") if dias <= 3 
+        else ("#10b981", "#ecfdf5", f"✅ Vence em {dias} dias"))
+    )
 
     badge_html = ""
     detalhes_html = ""
@@ -312,7 +328,7 @@ def renderizar_card_e_agendamento(row, unidade_nome, idx_chave, banco_ag, hoje):
     partes_nome = nome_str.split()
     primeiro_nome_card = partes_nome[0] if len(partes_nome) > 0 else "Colaborador"
 
-    with st.expander(f"⚙️ Gerar Agendamento / Guia - {primeiro_nome_card}"):
+    with st.expander(f"⚙️ Gerenciar Agendamento / Guia - {primeiro_nome_card} ({venc_str})"):
         tipo = st.selectbox("Tipo de Exame", ["PERIÓDICO", "MUDANÇA DE RISCO", "RETORNO"], key=f"t_{idx_chave}")
 
         padrao_data = (hoje + timedelta(days=2)).date()
@@ -330,12 +346,26 @@ def renderizar_card_e_agendamento(row, unidade_nome, idx_chave, banco_ag, hoje):
         obs_input = st.text_area("📝 Observações (Clínica, médico, detalhes...)", value=padrao_obs, key=f"obs_{idx_chave}")
 
         def salvar_e_agendar(chave=chave_registro, data_val=dt_sugestao, hora_val=hora_input, obs_val=obs_input):
-            gravar_agendamento(chave, {
+            dados_salvar = {
                 "status": True,
                 "data": data_val.strftime("%d/%m/%Y"),
                 "hora": hora_val.strip(),
                 "obs": obs_val.strip(),
-                "unidade": unidade_nome
+                "unidade": unidade_nome,
+                "venc_original": venc_str
+            }
+            gravar_agendamento(chave, dados_salvar)
+            
+            # Formata a string para a coluna M da folha
+            txt_status_planilha = f"{data_val.strftime('%d/%m/%Y')} às {hora_val.strip()}" + (f" - {obs_val.strip()}" if obs_val.strip() else "")
+            
+            # Envia diretamente para o seu script doPost
+            enviar_webhook_planilha({
+                "aba": unidade_nome,
+                "nome": nome_str,
+                "venc_original": venc_str,
+                "status": txt_status_planilha,
+                "acao": "agendamento"
             })
 
         btn_doc = gerar_docx(row, tipo, dt_sugestao, unidade_nome)
@@ -343,7 +373,7 @@ def renderizar_card_e_agendamento(row, unidade_nome, idx_chave, banco_ag, hoje):
         st.download_button(
             label="📥 Baixar Documento e Marcar como Agendado",
             data=btn_doc,
-            file_name=f"ASO_{nome_str}.docx",
+            file_name=f"ASO_{nome_str}_{venc_str.replace('/', '-')}.docx",
             key=f"b_{idx_chave}",
             on_click=salvar_e_agendar
         )
@@ -352,15 +382,47 @@ def renderizar_card_e_agendamento(row, unidade_nome, idx_chave, banco_ag, hoje):
         with c_salvar:
             if st.button("💾 Apenas Salvar Status", key=f"btn_salvar_{idx_chave}"):
                 salvar_e_agendar()
-                st.toast("✅ Agendamento salvo com sucesso!")
+                st.toast("✅ Agendamento salvo e sincronizado!")
                 st.rerun()
 
         with c_limpar:
             if agendado_ativo:
                 if st.button("🗑️ Limpar / Desmarcar", key=f"btn_limpar_{idx_chave}"):
-                    remover_agendamento(chave_registro)
+                    remover_agendamento(chave_registro, {
+                        "aba": unidade_nome,
+                        "nome": nome_str,
+                        "venc_original": venc_str,
+                        "acao": "limpar"
+                    })
                     st.toast("🗑️ Agendamento removido!")
                     st.rerun()
+
+        # =========================================================
+        # SEÇÃO: ATUALIZAR REALIZAÇÃO E NOVO VENCIMENTO NA FOLHA
+        # =========================================================
+        st.markdown("---")
+        st.markdown("##### 🔄 Concluir Exame e Atualizar Vencimento")
+        st.caption("Ao preencher abaixo, a nova data do ASO e o novo vencimento serão gravados diretamente na folha de cálculo.")
+
+        c_aso, c_venc = st.columns(2)
+        with c_aso:
+            nova_data_aso = st.date_input("Data de Realização do ASO", value=hoje.date(), key=f"dt_aso_nova_{idx_chave}")
+        with c_venc:
+            novo_vencimento = st.date_input("Nova Data de Vencimento", value=(nova_data_aso + timedelta(days=365)), key=f"dt_venc_nova_{idx_chave}")
+
+        if st.button("✅ Gravar Novo Vencimento na Planilha", key=f"btn_atualizar_venc_{idx_chave}"):
+            remover_agendamento(chave_registro) # Remove o status temporário
+            enviar_webhook_planilha({
+                "aba": unidade_nome,
+                "nome": nome_str,
+                "venc_original": venc_str,
+                "nova_data_aso": nova_data_aso.strftime("%d/%m/%Y"),
+                "novo_vencimento": novo_vencimento.strftime("%d/%m/%Y"),
+                "acao": "atualizar_aso"
+            })
+            st.cache_data.clear() # Limpa cache da folha para puxar as novas datas
+            st.success("✅ Exame concluído! Nova data gravada na folha com sucesso.")
+            st.rerun()
 
 # =========================================================
 # SIDEBAR
@@ -382,7 +444,7 @@ if st.sidebar.button("📋 CHECKLIST SSMA"):
     st.switch_page("pages/app_ssma_ia.py")
 
 # =========================================================
-# 🔍 BUSCA ATIVA E EMISSÃO DE GUIA AVULSA (COM GERENCIAMENTO)
+# 🔍 BUSCA ATIVA E EMISSÃO DE GUIA AVULSA
 # =========================================================
 st.markdown("### 🔍 Busca Ativa e Emissão de Guia Avulsa")
 
@@ -426,23 +488,22 @@ if not df_todos.empty and "Nome" in df_todos.columns:
     )
 
     if colab_escolhido and colab_escolhido != "Selecione um colaborador...":
-        registro_filtrado = df_todos[df_todos["Nome"].astype(str) == str(colab_escolhido)]
-        if not registro_filtrado.empty:
-            dados_colab = registro_filtrado.iloc[0]
-            unidade_origem = str(dados_colab.get("UNIDADE_REAL", aba_nome))
+        registros_colab = df_todos[df_todos["Nome"].astype(str) == str(colab_escolhido)]
+        if not registros_colab.empty:
+            for b_idx, (_, d_row) in enumerate(registros_colab.iterrows()):
+                unid_row = str(d_row.get("UNIDADE_REAL", aba_nome))
+                v_str = str(d_row.get("Venc", ""))
+                st.markdown(f"##### 👤 Ficha e Agendamento: {colab_escolhido} (Venc: {v_str})")
+                renderizar_card_e_agendamento(d_row, unid_row, f"busca_ativa_{b_idx}", banco_ag, hoje)
         else:
-            dados_colab = pd.Series({
+            mock_row = pd.Series({
                 "Nome": str(colab_escolhido),
                 "Cargo": "Geral",
                 "Setor": "Operacional",
                 "UNIDADE_REAL": aba_nome,
                 "Venc": hoje + timedelta(days=30)
             })
-            unidade_origem = aba_nome
-
-        # RENDERIZA O CARD COMPLETO + FORMULÁRIO DE AGENDAMENTO NA BUSCA ATIVA
-        st.markdown(f"##### 👤 Ficha e Agendamento: {colab_escolhido}")
-        renderizar_card_e_agendamento(dados_colab, unidade_origem, "busca_ativa", banco_ag, hoje)
+            renderizar_card_e_agendamento(mock_row, aba_nome, "busca_ativa_mock", banco_ag, hoje)
 
 st.markdown("<hr style='margin: 25px 0;'>", unsafe_allow_html=True)
 
@@ -465,19 +526,18 @@ try:
         
         df_base["Dias"] = (df_base["Venc"] - hoje).dt.days
 
-        # Identifica quem já está agendado para fixar no painel
-        def esta_agendado_check(nome):
-            chave = f"{aba_nome}_{nome}"
+        # Identifica agendamentos respeitando o par (Nome + Vencimento)
+        def esta_agendado_check(row):
+            v_s = row["Venc"].strftime("%d-%m-%Y")
+            chave = f"{aba_nome}_{row['Nome']}_{v_s}"
             d = banco_ag.get(chave)
             if d and d.get("status"):
                 return True
             return False
 
-        df_base["Is_Agendado"] = df_base["Nome"].apply(esta_agendado_check)
+        df_base["Is_Agendado"] = df_base.apply(esta_agendado_check, axis=1)
 
-        # Contadores Métricos
         total_vencidos = len(df_base[df_base["Dias"] < 0])
-        total_pendentes = len(df_base[(df_base["Dias"] >= 0) & (df_base["Dias"] <= 30)])
         total_agendados = len(df_base[df_base["Is_Agendado"]])
 
         c1, c2, c3, c4 = st.columns(4)
@@ -488,7 +548,6 @@ try:
 
         st.markdown("#### 📋 Monitoramento e Prazos")
 
-        # FILTROS DE VISUALIZAÇÃO SELECIONÁVEIS
         filtro_selecionado = st.radio(
             "Filtrar colaboradores:",
             options=[
@@ -503,7 +562,6 @@ try:
             horizontal=True
         )
 
-        # Aplicação dos filtros com regra de FIXAÇÃO DE AGENDADOS
         if filtro_selecionado == "🚨 Vencidos e Próximos (Padrão: até 30 dias)":
             alertas = df_base[(df_base["Venc"] <= hoje + timedelta(days=30)) | (df_base["Is_Agendado"])].copy()
         elif filtro_selecionado == "🚨 Apenas Vencidos":
@@ -524,7 +582,7 @@ try:
         if alertas.empty:
             st.info("Nenhum colaborador encontrado para o filtro selecionado.")
         else:
-            st.caption(f"Mostrando **{len(alertas)}** colaboradores correspondentes.")
+            st.caption(f"Mostrando **{len(alertas)}** registos de ASO.")
             cols = st.columns(2)
             for idx, (_, row) in enumerate(alertas.iterrows()):
                 with cols[idx % 2]:

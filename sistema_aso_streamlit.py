@@ -66,7 +66,6 @@ def gravar_agendamento(chave, dados):
         st.error(f"Erro ao salvar localmente: {e}")
 
 def remover_agendamento(chave):
-    """Remove o agendamento e marca como cancelado para sobrepor a planilha se necessário."""
     banco = ler_banco_agendamentos()
     banco[chave] = {"status": False, "data": "", "hora": "", "obs": ""}
     try:
@@ -244,6 +243,125 @@ def gerar_docx(dados, tipo, data_sugestao, unidade_padrao="MACROMAQ"):
     doc.save(target)
     return target.getvalue()
 
+def renderizar_card_e_agendamento(row, unidade_nome, idx_chave, banco_ag, hoje):
+    """Função reutilizável para desenhar o card + expander de agendamento em qualquer parte."""
+    nome_str = str(row["Nome"]).strip()
+    cargo_str = str(row.get("Cargo", "Não informado")) if pd.notna(row.get("Cargo")) and str(row.get("Cargo")).strip() != "" else "Não informado"
+    setor_str = str(row.get("Setor", "Não informado")) if pd.notna(row.get("Setor")) and str(row.get("Setor")).strip() != "" else "Não informado"
+    
+    # Tratamento de data de vencimento
+    venc_dt = pd.to_datetime(row.get("Venc"), dayfirst=True, errors="coerce")
+    if pd.notna(venc_dt):
+        dias = int((venc_dt - hoje).days)
+        venc_str = venc_dt.strftime("%d/%m/%Y")
+    else:
+        dias = 9999
+        venc_str = "Não informada"
+
+    cor, fundo, status = (
+        ("#ef4444", "#fff1f2", "🚨 ASO VENCIDO") if dias < 0 
+        else (("#f59e0b", "#fff7ed", f"⚠️ Vence em {dias} dias") if dias <= 3 
+        else ("#10b981", "#ecfdf5", f"✅ Vence em {dias} dias"))
+    )
+
+    chave_registro = f"{unidade_nome}_{nome_str}"
+    dados_locais = banco_ag.get(chave_registro, None)
+
+    agendado_ativo = False
+    texto_detalhe_agendamento = ""
+    
+    if dados_locais is not None:
+        agendado_ativo = bool(dados_locais.get("status", False))
+        data_salva = dados_locais.get("data", "")
+        hora_salva = dados_locais.get("hora", "")
+        obs_salva = dados_locais.get("obs", "")
+        if agendado_ativo:
+            texto_detalhe_agendamento = f"🗓️ <b>Agendado:</b> {data_salva}" + (f" às {hora_salva}" if hora_salva else "")
+            if obs_salva:
+                texto_detalhe_agendamento += f"<br>📝 <b>Obs:</b> {obs_salva}"
+    else:
+        if "Agendamento" in row.index and pd.notna(row["Agendamento"]):
+            txt_planilha = str(row["Agendamento"]).strip()
+            if txt_planilha and txt_planilha.lower() not in ["nan", "none"]:
+                agendado_ativo = True
+                texto_detalhe_agendamento = f"🗓️ <b>Agendado:</b> {txt_planilha}"
+
+    badge_html = ""
+    detalhes_html = ""
+    if agendado_ativo:
+        badge_html = '<span style="background:#2563eb; color:white; padding:4px 10px; border-radius:8px; font-size:12px; font-weight:bold; margin-left:10px;">📌 AGENDADO</span>'
+        detalhes_html = f"""
+        <div style="margin-top:10px; padding:10px 14px; background:#e0f2fe; border-radius:10px; color:#0369a1; font-size:13px; border:1px solid #bae6fd;">
+            {texto_detalhe_agendamento}
+        </div>
+        """
+
+    html_card = f"""
+    <div style="background:{fundo}; border-left:8px solid {cor}; border-radius:18px; padding:22px; margin-bottom:15px; box-shadow:0 4px 18px rgba(0,0,0,0.08); font-family:Arial;">
+        <div style="font-size:22px; font-weight:700; color:#111827; margin-bottom:10px; display:flex; align-items:center; flex-wrap:wrap;">
+            {nome_str} {badge_html}
+        </div>
+        <div style="color:#475569; font-size:15px; line-height:1.8;">👔 <b>Cargo:</b> {cargo_str}<br>🏭 <b>Setor:</b> {setor_str}<br>📅 <b>Vencimento:</b> {venc_str}</div>
+        {detalhes_html}
+        <div style="margin-top:15px; font-size:16px; font-weight:bold; color:{cor};">{status}</div>
+    </div>"""
+
+    altura_card = 310 if agendado_ativo else 240
+    components.html(html_card, height=altura_card)
+
+    partes_nome = nome_str.split()
+    primeiro_nome_card = partes_nome[0] if len(partes_nome) > 0 else "Colaborador"
+
+    with st.expander(f"⚙️ Gerar Agendamento / Guia - {primeiro_nome_card}"):
+        tipo = st.selectbox("Tipo de Exame", ["PERIÓDICO", "MUDANÇA DE RISCO", "RETORNO"], key=f"t_{idx_chave}")
+
+        padrao_data = (hoje + timedelta(days=2)).date()
+        if dados_locais and dados_locais.get("data"):
+            try:
+                padrao_data = datetime.strptime(dados_locais["data"], "%d/%m/%Y").date()
+            except Exception:
+                pass
+
+        dt_sugestao = st.date_input("📅 Data Sugerida / Agendamento", value=padrao_data, key=f"d_{idx_chave}")
+        padrao_hora = dados_locais.get("hora", "08:00") if dados_locais else "08:00"
+        hora_input = st.text_input("⏰ Horário (ex: 08:30)", value=padrao_hora, key=f"hr_{idx_chave}")
+
+        padrao_obs = dados_locais.get("obs", "") if dados_locais else (str(row.get("Agendamento", "")) if pd.notna(row.get("Agendamento")) and str(row.get("Agendamento")).lower() not in ["nan", "none"] else "")
+        obs_input = st.text_area("📝 Observações (Clínica, médico, detalhes...)", value=padrao_obs, key=f"obs_{idx_chave}")
+
+        def salvar_e_agendar(chave=chave_registro, data_val=dt_sugestao, hora_val=hora_input, obs_val=obs_input):
+            gravar_agendamento(chave, {
+                "status": True,
+                "data": data_val.strftime("%d/%m/%Y"),
+                "hora": hora_val.strip(),
+                "obs": obs_val.strip(),
+                "unidade": unidade_nome
+            })
+
+        btn_doc = gerar_docx(row, tipo, dt_sugestao, unidade_nome)
+
+        st.download_button(
+            label="📥 Baixar Documento e Marcar como Agendado",
+            data=btn_doc,
+            file_name=f"ASO_{nome_str}.docx",
+            key=f"b_{idx_chave}",
+            on_click=salvar_e_agendar
+        )
+
+        c_salvar, c_limpar = st.columns(2)
+        with c_salvar:
+            if st.button("💾 Apenas Salvar Status", key=f"btn_salvar_{idx_chave}"):
+                salvar_e_agendar()
+                st.toast("✅ Agendamento salvo com sucesso!")
+                st.rerun()
+
+        with c_limpar:
+            if agendado_ativo:
+                if st.button("🗑️ Limpar / Desmarcar", key=f"btn_limpar_{idx_chave}"):
+                    remover_agendamento(chave_registro)
+                    st.toast("🗑️ Agendamento removido!")
+                    st.rerun()
+
 # =========================================================
 # SIDEBAR
 # =========================================================
@@ -264,11 +382,13 @@ if st.sidebar.button("📋 CHECKLIST SSMA"):
     st.switch_page("pages/app_ssma_ia.py")
 
 # =========================================================
-# 🔍 BUSCA ATIVA E EMISSÃO DE GUIA AVULSA
+# 🔍 BUSCA ATIVA E EMISSÃO DE GUIA AVULSA (COM GERENCIAMENTO)
 # =========================================================
 st.markdown("### 🔍 Busca Ativa e Emissão de Guia Avulsa")
 
 df_todos = carregar_base_completa()
+banco_ag = ler_banco_agendamentos()
+hoje = datetime.now()
 
 if not df_todos.empty and "Nome" in df_todos.columns:
     colab_param = st.query_params.get("colaborador", None)
@@ -309,169 +429,106 @@ if not df_todos.empty and "Nome" in df_todos.columns:
         registro_filtrado = df_todos[df_todos["Nome"].astype(str) == str(colab_escolhido)]
         if not registro_filtrado.empty:
             dados_colab = registro_filtrado.iloc[0]
+            unidade_origem = str(dados_colab.get("UNIDADE_REAL", aba_nome))
         else:
-            dados_colab = {"Nome": str(colab_escolhido), "Cargo": "Geral", "Setor": "Operacional", "UNIDADE_REAL": "MACROMAQ"}
-            
-        partes = str(colab_escolhido).strip().split()
-        primeiro_nome = partes[0] if len(partes) > 0 else "Colaborador"
-        hoje = datetime.now()
-        doc_bytes = gerar_docx(dados_colab, "PERIÓDICO", hoje + timedelta(days=2), aba_nome)
-        
-        st.download_button(
-            label=f"📥 Baixar Formulário de {primeiro_nome}",
-            data=doc_bytes,
-            file_name=f"ASO_{colab_escolhido}.docx",
-            key="btn_download_direto"
-        )
+            dados_colab = pd.Series({
+                "Nome": str(colab_escolhido),
+                "Cargo": "Geral",
+                "Setor": "Operacional",
+                "UNIDADE_REAL": aba_nome,
+                "Venc": hoje + timedelta(days=30)
+            })
+            unidade_origem = aba_nome
+
+        # RENDERIZA O CARD COMPLETO + FORMULÁRIO DE AGENDAMENTO NA BUSCA ATIVA
+        st.markdown(f"##### 👤 Ficha e Agendamento: {colab_escolhido}")
+        renderizar_card_e_agendamento(dados_colab, unidade_origem, "busca_ativa", banco_ag, hoje)
 
 st.markdown("<hr style='margin: 25px 0;'>", unsafe_allow_html=True)
 
 # =========================================================
-# MONITORAMENTO DE ALERTAS DE VENCIMENTO
+# MONITORAMENTO DE ALERTAS COM FILTRO DE VENCIMENTOS
 # =========================================================
 try:
     df_unidade = load_data(UNIDADES[aba_nome])
     
     if not df_unidade.empty and "Nome" in df_unidade.columns and "Venc" in df_unidade.columns:
-        hoje = datetime.now()
-        
         df_unidade["Venc"] = pd.to_datetime(df_unidade["Venc"], dayfirst=True, errors="coerce")
-        df_alertas = df_unidade.dropna(subset=["Venc", "Nome"]).copy()
+        df_base = df_unidade.dropna(subset=["Venc", "Nome"]).copy()
         
-        df_alertas["Nome_Limpo"] = df_alertas["Nome"].astype(str).str.strip()
-        df_alertas = df_alertas[df_alertas["Nome_Limpo"] != ""]
-        df_alertas = df_alertas[df_alertas["Nome_Limpo"].str.lower() != "nan"]
-        df_alertas = df_alertas[df_alertas["Nome_Limpo"].str.lower() != "none"]
-        df_alertas = df_alertas[df_alertas["Venc"].dt.year >= 2020]
+        # Filtros de higienização
+        df_base["Nome"] = df_base["Nome"].astype(str).str.strip()
+        df_base = df_base[df_base["Nome"] != ""]
+        df_base = df_base[df_base["Nome"].str.lower() != "nan"]
+        df_base = df_base[df_base["Nome"].str.lower() != "none"]
+        df_base = df_base[df_base["Venc"].dt.year >= 2020]
         
-        df_alertas["Dias"] = (df_alertas["Venc"] - hoje).dt.days
-        alertas = df_alertas[df_alertas["Venc"] <= hoje + timedelta(days=10)].copy().sort_values(by="Venc")
+        df_base["Dias"] = (df_base["Venc"] - hoje).dt.days
+
+        # Identifica quem já está agendado para fixar no painel
+        def esta_agendado_check(nome):
+            chave = f"{aba_nome}_{nome}"
+            d = banco_ag.get(chave)
+            if d and d.get("status"):
+                return True
+            return False
+
+        df_base["Is_Agendado"] = df_base["Nome"].apply(esta_agendado_check)
+
+        # Contadores Métricos
+        total_vencidos = len(df_base[df_base["Dias"] < 0])
+        total_pendentes = len(df_base[(df_base["Dias"] >= 0) & (df_base["Dias"] <= 30)])
+        total_agendados = len(df_base[df_base["Is_Agendado"]])
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("🏢 Unidade", aba_nome)
         c2.metric("👥 Colaboradores", len(df_unidade))
-        c3.metric("⚠️ Pendentes", len(alertas))
-        c4.metric("🚨 Vencidos", len(alertas[alertas["Dias"] < 0]))
+        c3.metric("🚨 Vencidos", total_vencidos)
+        c4.metric("📌 Agendados", total_agendados)
 
-        st.markdown("#### 📋 Alertas de Vencimento da Unidade")
-        
-        if alertas.empty:
-            st.info("Nenhum ASO vencido ou a vencer nos próximos 10 dias para esta unidade.")
+        st.markdown("#### 📋 Monitoramento e Prazos")
+
+        # FILTROS DE VISUALIZAÇÃO SELECIONÁVEIS
+        filtro_selecionado = st.radio(
+            "Filtrar colaboradores:",
+            options=[
+                "🚨 Vencidos e Próximos (Padrão: até 30 dias)",
+                "🚨 Apenas Vencidos",
+                "⚠️ Vence em até 10 dias",
+                "📅 Vence em até 60 dias",
+                "🌐 Todos a Vencer (+30 dias)",
+                "📌 Somente Agendados",
+                "📄 Todos os Colaboradores"
+            ],
+            horizontal=True
+        )
+
+        # Aplicação dos filtros com regra de FIXAÇÃO DE AGENDADOS
+        if filtro_selecionado == "🚨 Vencidos e Próximos (Padrão: até 30 dias)":
+            alertas = df_base[(df_base["Venc"] <= hoje + timedelta(days=30)) | (df_base["Is_Agendado"])].copy()
+        elif filtro_selecionado == "🚨 Apenas Vencidos":
+            alertas = df_base[df_base["Dias"] < 0].copy()
+        elif filtro_selecionado == "⚠️ Vence em até 10 dias":
+            alertas = df_base[(df_base["Dias"] <= 10) | (df_base["Is_Agendado"])].copy()
+        elif filtro_selecionado == "📅 Vence em até 60 dias":
+            alertas = df_base[(df_base["Dias"] <= 60) | (df_base["Is_Agendado"])].copy()
+        elif filtro_selecionado == "🌐 Todos a Vencer (+30 dias)":
+            alertas = df_base[df_base["Dias"] > 30].copy()
+        elif filtro_selecionado == "📌 Somente Agendados":
+            alertas = df_base[df_base["Is_Agendado"]].copy()
         else:
-            banco_ag = ler_banco_agendamentos()
+            alertas = df_base.copy()
+
+        alertas = alertas.sort_values(by="Venc")
+
+        if alertas.empty:
+            st.info("Nenhum colaborador encontrado para o filtro selecionado.")
+        else:
+            st.caption(f"Mostrando **{len(alertas)}** colaboradores correspondentes.")
             cols = st.columns(2)
-            
             for idx, (_, row) in enumerate(alertas.iterrows()):
-                col = cols[idx % 2]
-                dias = int(row["Dias"])
-                cor, fundo, status = (
-                    ("#ef4444", "#fff1f2", "🚨 ASO VENCIDO") if dias < 0 
-                    else (("#f59e0b", "#fff7ed", f"⚠️ Vence em {dias} dias") if dias <= 3 
-                    else ("#10b981", "#ecfdf5", f"✅ Vence em {dias} dias"))
-                )
-
-                nome_str = str(row["Nome_Limpo"])
-                cargo_str = str(row.get("Cargo", "Não informado")) if pd.notna(row.get("Cargo")) and str(row.get("Cargo")).strip() != "" else "Não informado"
-                setor_str = str(row.get("Setor", "Não informado")) if pd.notna(row.get("Setor")) and str(row.get("Setor")).strip() != "" else "Não informado"
-                venc_str = row["Venc"].strftime("%d/%m/%Y")
-
-                chave_registro = f"{aba_nome}_{nome_str}"
-                dados_locais = banco_ag.get(chave_registro, None)
-
-                # Prioridade: 1) Marcado no aplicativo | 2) Vindo da folha de cálculo
-                agendado_ativo = False
-                texto_detalhe_agendamento = ""
-                
-                if dados_locais is not None:
-                    agendado_ativo = bool(dados_locais.get("status", False))
-                    data_salva = dados_locais.get("data", "")
-                    hora_salva = dados_locais.get("hora", "")
-                    obs_salva = dados_locais.get("obs", "")
-                    if agendado_ativo:
-                        texto_detalhe_agendamento = f"🗓️ <b>Agendado:</b> {data_salva}" + (f" às {hora_salva}" if hora_salva else "")
-                        if obs_salva:
-                            texto_detalhe_agendamento += f"<br>📝 <b>Obs:</b> {obs_salva}"
-                else:
-                    if "Agendamento" in row.index and pd.notna(row["Agendamento"]):
-                        txt_planilha = str(row["Agendamento"]).strip()
-                        if txt_planilha and txt_planilha.lower() not in ["nan", "none"]:
-                            agendado_ativo = True
-                            texto_detalhe_agendamento = f"🗓️ <b>Agendado:</b> {txt_planilha}"
-
-                badge_html = ""
-                detalhes_html = ""
-                if agendado_ativo:
-                    badge_html = '<span style="background:#2563eb; color:white; padding:4px 10px; border-radius:8px; font-size:12px; font-weight:bold; margin-left:10px;">📌 AGENDADO</span>'
-                    detalhes_html = f"""
-                    <div style="margin-top:10px; padding:10px 14px; background:#e0f2fe; border-radius:10px; color:#0369a1; font-size:13px; border:1px solid #bae6fd;">
-                        {texto_detalhe_agendamento}
-                    </div>
-                    """
-
-                html_card = f"""
-                <div style="background:{fundo}; border-left:8px solid {cor}; border-radius:18px; padding:22px; margin-bottom:15px; box-shadow:0 4px 18px rgba(0,0,0,0.08); font-family:Arial;">
-                    <div style="font-size:22px; font-weight:700; color:#111827; margin-bottom:10px; display:flex; align-items:center; flex-wrap:wrap;">
-                        {nome_str} {badge_html}
-                    </div>
-                    <div style="color:#475569; font-size:15px; line-height:1.8;">👔 <b>Cargo:</b> {cargo_str}<br>🏭 <b>Setor:</b> {setor_str}<br>📅 <b>Vencimento:</b> {venc_str}</div>
-                    {detalhes_html}
-                    <div style="margin-top:15px; font-size:16px; font-weight:bold; color:{cor};">{status}</div>
-                </div>"""
-
-                with col:
-                    altura_card = 310 if agendado_ativo else 240
-                    components.html(html_card, height=altura_card)
-                    
-                    partes_nome = nome_str.split()
-                    primeiro_nome_card = partes_nome[0] if len(partes_nome) > 0 else "Colaborador"
-                    
-                    with st.expander(f"⚙️ Gerar Agendamento / Guia - {primeiro_nome_card}"):
-                        tipo = st.selectbox("Tipo de Exame", ["PERIÓDICO", "MUDANÇA DE RISCO", "RETORNO"], key=f"t_{idx}")
-                        
-                        # Data sugerida (mesma data do agendamento)
-                        padrao_data = (hoje + timedelta(days=2)).date()
-                        if dados_locais and dados_locais.get("data"):
-                            try:
-                                padrao_data = datetime.strptime(dados_locais["data"], "%d/%m/%Y").date()
-                            except Exception:
-                                pass
-                                
-                        dt_sugestao = st.date_input("📅 Data Sugerida / Agendamento", value=padrao_data, key=f"d_{idx}")
-                        
-                        # Horário e observações
-                        padrao_hora = dados_locais.get("hora", "08:00") if dados_locais else "08:00"
-                        hora_input = st.text_input("⏰ Horário (ex: 08:30)", value=padrao_hora, key=f"hr_{chave_registro}_{idx}")
-                        
-                        padrao_obs = dados_locais.get("obs", "") if dados_locais else (str(row.get("Agendamento", "")) if pd.notna(row.get("Agendamento")) and str(row.get("Agendamento")).lower() not in ["nan", "none"] else "")
-                        obs_input = st.text_area("📝 Observações (Clínica, médico, detalhes...)", value=padrao_obs, key=f"obs_{chave_registro}_{idx}")
-
-                        # Função disparada automaticamente ao baixar
-                        def salvar_e_agendar(chave=chave_registro, data_val=dt_sugestao, hora_val=hora_input, obs_val=obs_input):
-                            gravar_agendamento(chave, {
-                                "status": True,
-                                "data": data_val.strftime("%d/%m/%Y"),
-                                "hora": hora_val.strip(),
-                                "obs": obs_val.strip()
-                            })
-
-                        btn_doc = gerar_docx(row, tipo, dt_sugestao, aba_nome)
-                        
-                        # Botão de download com marcação automática
-                        st.download_button(
-                            label="📥 Baixar Documento e Marcar como Agendado",
-                            data=btn_doc,
-                            file_name=f"ASO_{nome_str}.docx",
-                            key=f"b_{idx}",
-                            on_click=salvar_e_agendar
-                        )
-
-                        # BOTÃO PARA LIMPAR O AGENDAMENTO
-                        if agendado_ativo:
-                            st.markdown("<br>", unsafe_allow_html=True)
-                            if st.button("🗑️ Limpar / Desmarcar Agendamento", key=f"btn_limpar_{chave_registro}_{idx}"):
-                                remover_agendamento(chave_registro)
-                                st.toast("🗑️ Agendamento removido com sucesso!")
-                                st.rerun()
+                with cols[idx % 2]:
+                    renderizar_card_e_agendamento(row, aba_nome, f"painel_{idx}", banco_ag, hoje)
     else:
         st.warning(f"Sem dados carregados para a unidade {aba_nome}.")
 except Exception as e:

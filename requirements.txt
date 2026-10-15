@@ -1,5 +1,6 @@
 streamlit
-requests
-pandas
+docxtpl
 python-docx
-python-pptx
+pandas
+plotly
+google-generativeai

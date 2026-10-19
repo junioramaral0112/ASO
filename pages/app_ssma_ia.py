@@ -25,28 +25,31 @@ model = genai.GenerativeModel("gemini-1.5-flash")
 
 PATH_BASE = ""
 
-def gerar_texto_ia(pergunta, status, diagnostico=""):
+def gerar_texto_ia(pergunta, diagnostico=""):
+    """Gera justificativa técnica e ação corretiva apenas para desvios identificados."""
     try:
-        if status == "Conforme":
-            prompt = f"Gere uma frase curta técnica confirmando que o item '{pergunta}' cumpre os requisitos SSMA da Macromaq."
-        else:
-            prompt = f"Especialista SSMA. Item: {pergunta}. Diagnóstico: {diagnostico}. Formato: JUSTIFICATIVA | AÇÃO CORRETIVA."
+        prompt = (
+            f"Você é um especialista SSMA. Analise o seguinte desvio de campo:\n"
+            f"Item: {pergunta}\n"
+            f"Diagnóstico de campo: {diagnostico}\n"
+            f"Responda EXATAMENTE no formato: JUSTIFICATIVA | AÇÃO CORRETIVA"
+        )
         response = model.generate_content(prompt)
         return response.text.strip()
     except Exception:
-        return "Item em conformidade." if status == "Conforme" else "Risco identificado | Realizar adequação conforme NR."
+        return f"Risco identificado: {diagnostico} | Realizar adequação imediata conforme Norma Regulamentadora."
 
 # =========================================================
-# MOTOR DE CONVERSÃO DOCX -> PDF
+# CONVERSÃO DOCX -> PDF
 # =========================================================
 def converter_docx_para_pdf(docx_bytes: bytes) -> bytes:
-    """Converte binário de Word para PDF utilizando LibreOffice Headless ou docx2pdf."""
+    """Converte binário de Word para PDF utilizando LibreOffice Headless com timeout."""
     with tempfile.TemporaryDirectory() as tmpdir:
         input_docx = os.path.join(tmpdir, "relatorio.docx")
         with open(input_docx, "wb") as f:
             f.write(docx_bytes)
 
-        # 1. Tenta via LibreOffice (padrão em servidores Linux, Docker e Streamlit Cloud)
+        # LibreOffice (Linux / Streamlit Cloud / Docker / Mac)
         libreoffice_cmd = shutil.which("libreoffice") or shutil.which("soffice")
         if libreoffice_cmd:
             subprocess.run(
@@ -62,13 +65,14 @@ def converter_docx_para_pdf(docx_bytes: bytes) -> bytes:
                 check=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                timeout=30,
             )
             output_pdf = os.path.join(tmpdir, "relatorio.pdf")
             if os.path.exists(output_pdf):
                 with open(output_pdf, "rb") as f:
                     return f.read()
 
-        # 2. Fallback para Windows com MS Word instalado
+        # Fallback local Windows com MS Word instalado
         try:
             from docx2pdf import convert
             output_pdf = os.path.join(tmpdir, "relatorio.pdf")
@@ -79,7 +83,7 @@ def converter_docx_para_pdf(docx_bytes: bytes) -> bytes:
         except Exception:
             pass
 
-    raise RuntimeError("Nenhum utilitário de conversão para PDF disponível (LibreOffice ou MS Word).")
+    raise RuntimeError("Nenhum utilitário de conversão para PDF configurado.")
 
 # =========================================================
 # BANCO DE DADOS
@@ -133,7 +137,7 @@ def get_next_rel_num():
         return f"0001/{ano}"
 
 # =========================================================
-# CONFIGURAÇÕES DE NEGÓCIO - FILIAIS E CHECKLIST
+# ESTRUTURA DE UNIDADES E CHECKLIST
 # =========================================================
 UNIDADES = {
     "SÃO JOSÉ (MATRIZ)": {
@@ -234,7 +238,7 @@ TEMAS_CHECKLIST = {
 }
 
 # =========================================================
-# APP PRINCIPAL
+# APLICAÇÃO PRINCIPAL
 # =========================================================
 def main():
     st.set_page_config(
@@ -280,7 +284,7 @@ def main():
             )
             gerente = st.text_input("Gerente da Unidade", "Deveide Mafra")
 
-        # Inicializa estado da auditoria
+        # Inicialização do estado de checklist
         if "auditoria" not in st.session_state:
             st.session_state.auditoria = {
                 p: {
@@ -294,7 +298,7 @@ def main():
                 for p in tema.keys()
             }
 
-        # Inicializa estado para download persistente
+        # Inicialização do estado do ficheiro para descarregamento
         if "relatorio_arquivo_pronto" not in st.session_state:
             st.session_state.relatorio_arquivo_pronto = None
         if "relatorio_nome_arquivo" not in st.session_state:
@@ -302,7 +306,7 @@ def main():
         if "relatorio_mime" not in st.session_state:
             st.session_state.relatorio_mime = "application/pdf"
 
-        # Formulário Checklist
+        # Exibição dos itens de auditoria
         for tema, itens in TEMAS_CHECKLIST.items():
             with st.expander(f"📁 {tema}"):
                 for pergunta, nr in itens.items():
@@ -341,14 +345,14 @@ def main():
                         )
                     st.divider()
 
-        # Botão para processar, salvar e gerar PDF
+        # Botão para processar os dados e gerar os ficheiros
         if st.button("🚀 FINALIZAR E SALVAR RELATÓRIO", type="primary"):
             caminho_template = os.path.join(PATH_BASE, "JORNADA_SSMA_Template.docx")
             if not os.path.exists(caminho_template):
-                st.error(f"Template não encontrado no caminho: '{caminho_template}'. Coloque o arquivo .docx na pasta do projeto.")
+                st.error(f"Ficheiro de modelo não encontrado: '{caminho_template}'. Verifique se o ficheiro .docx se encontra na raiz do projeto.")
             else:
                 try:
-                    with st.spinner("Estruturando relatório com IA e gerando documentos..."):
+                    with st.spinner("A estruturar relatório e a gerar documentos..."):
                         doc = DocxTemplate(caminho_template)
                         plano_acao = []
                         conformes = []
@@ -359,7 +363,8 @@ def main():
                                 v = st.session_state.auditoria[p]
 
                                 if v["status"] == "Não Conforme":
-                                    analise = gerar_texto_ia(p, "Não Conforme", v["obs"])
+                                    # Chamada à IA apenas se houver desvio apontado
+                                    analise = gerar_texto_ia(p, v["obs"])
                                     partes = analise.split("|")
                                     why = partes[0].strip() if len(partes) > 0 else "Risco identificado"
                                     how = partes[1].strip() if len(partes) > 1 else "Adequar conforme NR"
@@ -393,7 +398,7 @@ def main():
                                 elif v["status"] == "Conforme":
                                     conformes.append({
                                         "item": p,
-                                        "obs": gerar_texto_ia(p, "Conforme")
+                                        "obs": "Item verificado em conformidade com as diretrizes e requisitos de SSMA."
                                     })
 
                         data_hoje = datetime.now().strftime("%d/%m/%Y")
@@ -411,21 +416,21 @@ def main():
                             "conformes": conformes
                         }
 
-                        # Renderiza DOCX em memória
+                        # Renderização do documento DOCX em memória
                         doc.render(contexto)
                         out = io.BytesIO()
                         doc.save(out)
                         out.seek(0)
                         word_binary = out.getvalue()
 
-                        # Converte para PDF
+                        # Tentativa de conversão para formato PDF
                         pdf_binary = None
                         try:
                             pdf_binary = converter_docx_para_pdf(word_binary)
                         except Exception as err_pdf:
-                            st.warning(f"Aviso de conversão: {err_pdf}. Disponibilizando o DOCX para download.")
+                            st.warning(f"Aviso de conversão para PDF: {err_pdf}. O ficheiro Word (.docx) original será utilizado.")
 
-                        # Salva registros no banco de dados SQLite
+                        # Persistência na base de dados SQLite
                         conn = sqlite3.connect("jornada_ssma.db")
                         c = conn.cursor()
                         c.execute(
@@ -451,7 +456,7 @@ def main():
                         conn.commit()
                         conn.close()
 
-                        # Configura dados para o botão de download persistente
+                        # Configuração do descarregamento no estado da sessão
                         nome_limpo = f"Relatorio_{u_sel}_{rel_num.replace('/', '-')}"
                         if pdf_binary:
                             st.session_state.relatorio_arquivo_pronto = pdf_binary
@@ -462,15 +467,16 @@ def main():
                             st.session_state.relatorio_nome_arquivo = f"{nome_limpo}.docx"
                             st.session_state.relatorio_mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
-                        st.success(f"✅ Relatório {rel_num} gravado no banco de dados!")
-                except Exception as e:
-                    st.error(f"Erro ao processar e salvar o relatório: {e}")
+                        st.success(f"✅ Relatório {rel_num} gravado na base de dados com sucesso!")
 
-        # O botão fica exposto fora do bloco do clique do botão de salvar
+                except Exception as e:
+                    st.error(f"Erro ao processar e gravar o relatório: {e}")
+
+        # Secção de descarregamento persistente
         if st.session_state.relatorio_arquivo_pronto is not None:
             extensao = st.session_state.relatorio_nome_arquivo.split(".")[-1].upper()
             st.download_button(
-                label=f"📥 Baixar Relatório ({extensao})",
+                label=f"📥 Descarregar Relatório ({extensao})",
                 data=st.session_state.relatorio_arquivo_pronto,
                 file_name=st.session_state.relatorio_nome_arquivo,
                 mime=st.session_state.relatorio_mime,
@@ -558,7 +564,7 @@ def main():
                 )
                 st.plotly_chart(fig_p, use_container_width=True)
         else:
-            st.info("Nenhuma inspeção cadastrada no momento.")
+            st.info("Nenhuma inspeção registada de momento.")
 
     # -----------------------------------------------------
     # ABA 3 - FOLLOW-UP
@@ -594,9 +600,9 @@ def main():
                     with st.expander(f"📌 {row['item']} | Prazo: {row['prazo']}"):
                         st.error(f"**Diagnóstico:** {row['obs']}")
                         st.write(f"**Responsável:** {row['responsavel']}")
-                        f_dep = st.file_uploader(f"Anexar Comprovante / Foto de Baixa #{row['id']}", key=f"f_{row['id']}")
+                        f_dep = st.file_uploader(f"Anexar Comprovativo / Foto de Baixa #{row['id']}", key=f"f_{row['id']}")
 
-                        if st.button(f"Baixar Pendência #{row['id']}", type="primary", key=f"btn_{row['id']}"):
+                        if st.button(f"Concluir Pendência #{row['id']}", type="primary", key=f"btn_{row['id']}"):
                             cursor = conn.cursor()
                             foto_bytes = f_dep.getvalue() if f_dep else None
                             cursor.execute(
@@ -611,7 +617,7 @@ def main():
                             st.success(f"Item #{row['id']} concluído com sucesso!")
                             st.rerun()
             else:
-                st.success("🎉 Todas as filiais estão 100% em conformidade! Nenhuma pendência em aberto.")
+                st.success("🎉 Todas as unidades estão 100% em conformidade! Nenhuma pendência aberta.")
         except Exception as e:
             st.error(f"Erro ao carregar pendências: {e}")
         finally:
@@ -655,14 +661,14 @@ def main():
 
                     if blob:
                         c4.download_button(
-                            "📥 Baixar DOCX",
+                            "📥 Descarregar DOCX",
                             blob,
                             f"Relatorio_{row['rel_num'].replace('/', '-')}.docx",
                             key=f"h_{row['id']}"
                         )
                     st.divider()
             else:
-                st.info("Nenhum relatório emitido até o momento.")
+                st.info("Nenhum relatório emitido até ao momento.")
         except Exception:
             st.info("Histórico ainda vazio.")
         finally:

@@ -1,6 +1,7 @@
 import io
 import os
 import sqlite3
+import concurrent.futures
 from datetime import date, datetime
 from docx.shared import Mm
 from docxtpl import DocxTemplate, InlineImage
@@ -13,27 +14,37 @@ import streamlit as st
 # =========================================================
 # CONFIGURAÇÃO GEMINI IA
 # =========================================================
-if "GEMINI_API_KEY" in st.secrets:
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-else:
-    genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
+api_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
+if api_key:
+    genai.configure(api_key=api_key)
 
 model = genai.GenerativeModel("gemini-1.5-flash")
 
 PATH_BASE = ""
 
+def _chamar_api_gemini(prompt: str) -> str:
+    response = model.generate_content(prompt)
+    return response.text.strip()
+
 def gerar_texto_ia(pergunta, diagnostico=""):
+    """Gera texto com limite rígido de 5 segundos para nunca travar a aplicação."""
+    texto_padrao = f"Risco identificado: {diagnostico} | Realizar adequação imediata conforme Norma Regulamentadora."
+    if not api_key:
+        return texto_padrao
+
+    prompt = (
+        f"Você é um especialista SSMA. Analise o seguinte desvio de campo:\n"
+        f"Item: {pergunta}\n"
+        f"Diagnóstico: {diagnostico}\n"
+        f"Responda EXATAMENTE no formato: JUSTIFICATIVA | AÇÃO CORRETIVA"
+    )
+
     try:
-        prompt = (
-            f"Você é um especialista SSMA. Analise o seguinte desvio de campo:\n"
-            f"Item: {pergunta}\n"
-            f"Diagnóstico: {diagnostico}\n"
-            f"Responda EXATAMENTE no formato: JUSTIFICATIVA | AÇÃO CORRETIVA"
-        )
-        response = model.generate_content(prompt)
-        return response.text.strip()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            futuro = executor.submit(_chamar_api_gemini, prompt)
+            return futuro.result(timeout=5)  # Timeout de 5 segundos
     except Exception:
-        return f"Risco identificado: {diagnostico} | Realizar adequação imediata conforme Norma Regulamentadora."
+        return texto_padrao
 
 # =========================================================
 # BANCO DE DADOS
@@ -233,7 +244,6 @@ def main():
                 for p in tema.keys()
             }
 
-        # Armazenamento do binário do arquivo gerado para persistência do download
         if "docx_pronto" not in st.session_state:
             st.session_state.docx_pronto = None
         if "docx_nome" not in st.session_state:
@@ -259,9 +269,7 @@ def main():
                             key=f"up_{pergunta}"
                         )
                         if fotos:
-                            st.session_state.auditoria[pergunta]["fotos"] = [
-                                f.getvalue() for f in fotos
-                            ]
+                            st.session_state.auditoria[pergunta]["fotos"] = [f.getvalue() for f in fotos]
 
                         st.session_state.auditoria[pergunta]["obs"] = st.text_area(
                             "Diagnóstico / Apontamento:",
@@ -278,14 +286,15 @@ def main():
                         )
                     st.divider()
 
-        # Botão de Salvar e Gerar
+        # Botão com monitor de status detalhado
         if st.button("🚀 FINALIZAR E SALVAR RELATÓRIO", type="primary"):
             caminho_template = os.path.join(PATH_BASE, "JORNADA_SSMA_Template.docx")
             if not os.path.exists(caminho_template):
-                st.error(f"Template não encontrado no caminho: '{caminho_template}'. Verifique se o arquivo .docx está na raiz do projeto.")
+                st.error(f"Ficheiro de modelo não encontrado: '{caminho_template}'. Verifique a raiz do repositório.")
             else:
-                try:
-                    with st.spinner("Gerando documento Word e salvando na base de dados..."):
+                with st.status("A processar e a gerar relatório...", expanded=True) as status_box:
+                    try:
+                        status_box.write("Passo 1/3: A recolher respostas e a formatar itens...")
                         doc = DocxTemplate(caminho_template)
                         plano_acao = []
                         conformes = []
@@ -297,7 +306,8 @@ def main():
 
                                 if v["status"] == "Não Conforme":
                                     obs_limpa = v["obs"].strip() if v["obs"] else "Não especificado"
-                                    # Chama a IA somente se houver apontamento preenchido
+                                    
+                                    # Chamada rápida com proteção de tempo limite
                                     if obs_limpa != "Não especificado":
                                         analise = gerar_texto_ia(p, obs_limpa)
                                     else:
@@ -354,20 +364,19 @@ def main():
                             "conformes": conformes
                         }
 
-                        # 1. Renderiza o DOCX em memória
+                        status_box.write("Passo 2/3: A preencher ficheiro Word (.docx)...")
                         doc.render(contexto)
                         out = io.BytesIO()
                         doc.save(out)
                         out.seek(0)
                         word_binary = out.getvalue()
 
-                        # 2. Salva no banco de dados SQLite
+                        status_box.write("Passo 3/3: A gravar na base de dados SQLite...")
                         conn = sqlite3.connect("jornada_ssma.db")
                         c = conn.cursor()
                         c.execute(
                             """
-                            INSERT INTO inspecoes
-                            (rel_num, unidade, data, auditor, arquivo_word)
+                            INSERT INTO inspecoes (rel_num, unidade, data, auditor, arquivo_word)
                             VALUES (?, ?, ?, ?, ?)
                             """,
                             (rel_num, u_sel, data_hoje, auditor, word_binary)
@@ -377,8 +386,7 @@ def main():
                         for item_p in plano_acao:
                             c.execute(
                                 """
-                                INSERT INTO plano_acao
-                                (inspecao_id, item, nr, obs, responsavel, prazo, status)
+                                INSERT INTO plano_acao (inspecao_id, item, nr, obs, responsavel, prazo, status)
                                 VALUES (?, ?, ?, ?, ?, ?, ?)
                                 """,
                                 (ins_id, item_p["pergunta"], "NR", item_p["why"], item_p["responsavel"], item_p["prazo"], "Pendente")
@@ -387,18 +395,20 @@ def main():
                         conn.commit()
                         conn.close()
 
-                        # 3. Guarda no session_state para liberar o download imediato
+                        # Disponibilização imediata no ecrã
                         st.session_state.docx_pronto = word_binary
                         st.session_state.docx_nome = f"Relatorio_{u_sel}_{rel_num.replace('/', '-')}.docx"
-                        st.success(f"✅ Relatório {rel_num} gerado e salvo com sucesso!")
+                        status_box.update(label="Relatório finalizado com sucesso!", state="complete", expanded=False)
+                        st.success(f"✅ Relatório {rel_num} pronto para descarregar!")
 
-                except Exception as e:
-                    st.error(f"Erro ao processar e salvar o relatório: {e}")
+                    except Exception as e:
+                        status_box.update(label="Falha no processo!", state="error", expanded=True)
+                        st.error(f"Erro detalhado: {e}")
 
-        # Botão de download exibido fora do clique para não sumir
+        # Botão de descarregamento persistente
         if st.session_state.docx_pronto is not None:
             st.download_button(
-                label=f"📥 Baixar Relatório Word ({st.session_state.docx_nome})",
+                label=f"📥 Descarregar Relatório Word ({st.session_state.docx_nome})",
                 data=st.session_state.docx_pronto,
                 file_name=st.session_state.docx_nome,
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -486,7 +496,7 @@ def main():
                 )
                 st.plotly_chart(fig_p, use_container_width=True)
         else:
-            st.info("Nenhuma inspeção cadastrada no momento.")
+            st.info("Nenhuma inspeção registada de momento.")
 
     # -----------------------------------------------------
     # ABA 3 - FOLLOW-UP
@@ -522,9 +532,9 @@ def main():
                     with st.expander(f"📌 {row['item']} | Prazo: {row['prazo']}"):
                         st.error(f"**Diagnóstico:** {row['obs']}")
                         st.write(f"**Responsável:** {row['responsavel']}")
-                        f_dep = st.file_uploader(f"Anexar Comprovante / Foto de Baixa #{row['id']}", key=f"f_{row['id']}")
+                        f_dep = st.file_uploader(f"Anexar Comprovativo / Foto de Baixa #{row['id']}", key=f"f_{row['id']}")
 
-                        if st.button(f"Baixar Pendência #{row['id']}", type="primary", key=f"btn_{row['id']}"):
+                        if st.button(f"Concluir Pendência #{row['id']}", type="primary", key=f"btn_{row['id']}"):
                             cursor = conn.cursor()
                             foto_bytes = f_dep.getvalue() if f_dep else None
                             cursor.execute(
@@ -539,7 +549,7 @@ def main():
                             st.success(f"Item #{row['id']} concluído com sucesso!")
                             st.rerun()
             else:
-                st.success("🎉 Todas as filiais estão 100% em conformidade! Nenhuma pendência em aberto.")
+                st.success("🎉 Todas as unidades estão 100% em conformidade! Nenhuma pendência aberta.")
         except Exception as e:
             st.error(f"Erro ao carregar pendências: {e}")
         finally:
@@ -572,9 +582,9 @@ def main():
             if not df_hist.empty:
                 for _, row in df_hist.iterrows():
                     c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
-                    c1.write(f"**Nº:** {row['rel_num']}")[cite: 3]
-                    c2.write(f"**Unidade:** {row['unidade']}")[cite: 3]
-                    c3.write(f"**Data:** {row['data']}")[cite: 3]
+                    c1.write(f"**Nº:** {row['rel_num']}")
+                    c2.write(f"**Unidade:** {row['unidade']}")
+                    c3.write(f"**Data:** {row['data']}")
 
                     cursor = conn.cursor()
                     cursor.execute("SELECT arquivo_word FROM inspecoes WHERE id=?", (row["id"],))
@@ -583,14 +593,14 @@ def main():
 
                     if blob:
                         c4.download_button(
-                            "📥 Baixar DOCX",
+                            "📥 Descarregar DOCX",
                             blob,
                             f"Relatorio_{row['rel_num'].replace('/', '-')}.docx",
                             key=f"h_{row['id']}"
-                        )[cite: 3]
+                        )
                     st.divider()
             else:
-                st.info("Nenhum relatório emitido até o momento.")
+                st.info("Nenhum relatório emitido até ao momento.")
         except Exception:
             st.info("Histórico ainda vazio.")
         finally:

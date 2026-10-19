@@ -1,14 +1,17 @@
-import streamlit as st
-from docxtpl import DocxTemplate, InlineImage
-from docx.shared import Mm
-from datetime import datetime, date
 import io
+import os
+import shutil
 import sqlite3
+import subprocess
+import tempfile
+from datetime import date, datetime
+from docx.shared import Mm
+from docxtpl import DocxTemplate, InlineImage
+import google.generativeai as genai
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import google.generativeai as genai
-import os
+import streamlit as st
 
 # =========================================================
 # CONFIGURAÇÃO GEMINI IA (STREAMLIT SECRETS / AMBIENTE)
@@ -32,6 +35,51 @@ def gerar_texto_ia(pergunta, status, diagnostico=""):
         return response.text.strip()
     except Exception:
         return "Item em conformidade." if status == "Conforme" else "Risco identificado | Realizar adequação conforme NR."
+
+# =========================================================
+# MOTOR DE CONVERSÃO DOCX -> PDF
+# =========================================================
+def converter_docx_para_pdf(docx_bytes: bytes) -> bytes:
+    """Converte binário de Word para PDF utilizando LibreOffice Headless ou docx2pdf."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        input_docx = os.path.join(tmpdir, "relatorio.docx")
+        with open(input_docx, "wb") as f:
+            f.write(docx_bytes)
+
+        # 1. Tenta via LibreOffice (padrão em servidores Linux, Docker e Streamlit Cloud)
+        libreoffice_cmd = shutil.which("libreoffice") or shutil.which("soffice")
+        if libreoffice_cmd:
+            subprocess.run(
+                [
+                    libreoffice_cmd,
+                    "--headless",
+                    "--convert-to",
+                    "pdf",
+                    input_docx,
+                    "--outdir",
+                    tmpdir,
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            output_pdf = os.path.join(tmpdir, "relatorio.pdf")
+            if os.path.exists(output_pdf):
+                with open(output_pdf, "rb") as f:
+                    return f.read()
+
+        # 2. Fallback para Windows com MS Word instalado
+        try:
+            from docx2pdf import convert
+            output_pdf = os.path.join(tmpdir, "relatorio.pdf")
+            convert(input_docx, output_pdf)
+            if os.path.exists(output_pdf):
+                with open(output_pdf, "rb") as f:
+                    return f.read()
+        except Exception:
+            pass
+
+    raise RuntimeError("Nenhum utilitário de conversão para PDF disponível (LibreOffice ou MS Word).")
 
 # =========================================================
 # BANCO DE DADOS
@@ -232,6 +280,7 @@ def main():
             )
             gerente = st.text_input("Gerente da Unidade", "Deveide Mafra")
 
+        # Inicializa estado da auditoria
         if "auditoria" not in st.session_state:
             st.session_state.auditoria = {
                 p: {
@@ -245,6 +294,15 @@ def main():
                 for p in tema.keys()
             }
 
+        # Inicializa estado para download persistente
+        if "relatorio_arquivo_pronto" not in st.session_state:
+            st.session_state.relatorio_arquivo_pronto = None
+        if "relatorio_nome_arquivo" not in st.session_state:
+            st.session_state.relatorio_nome_arquivo = ""
+        if "relatorio_mime" not in st.session_state:
+            st.session_state.relatorio_mime = "application/pdf"
+
+        # Formulário Checklist
         for tema, itens in TEMAS_CHECKLIST.items():
             with st.expander(f"📁 {tema}"):
                 for pergunta, nr in itens.items():
@@ -283,107 +341,141 @@ def main():
                         )
                     st.divider()
 
+        # Botão para processar, salvar e gerar PDF
         if st.button("🚀 FINALIZAR E SALVAR RELATÓRIO", type="primary"):
-            try:
-                doc = DocxTemplate(os.path.join(PATH_BASE, "JORNADA_SSMA_Template.docx"))
-                plano_acao = []
-                conformes = []
-                constatacoes = []
+            caminho_template = os.path.join(PATH_BASE, "JORNADA_SSMA_Template.docx")
+            if not os.path.exists(caminho_template):
+                st.error(f"Template não encontrado no caminho: '{caminho_template}'. Coloque o arquivo .docx na pasta do projeto.")
+            else:
+                try:
+                    with st.spinner("Estruturando relatório com IA e gerando documentos..."):
+                        doc = DocxTemplate(caminho_template)
+                        plano_acao = []
+                        conformes = []
+                        constatacoes = []
 
-                for t, its in TEMAS_CHECKLIST.items():
-                    for p, nr in its.items():
-                        v = st.session_state.auditoria[p]
+                        for t, its in TEMAS_CHECKLIST.items():
+                            for p, nr in its.items():
+                                v = st.session_state.auditoria[p]
 
-                        if v["status"] == "Não Conforme":
-                            analise = gerar_texto_ia(p, "Não Conforme", v["obs"])
-                            partes = analise.split("|")
-                            why = partes[0] if len(partes) > 0 else "Risco identificado"
-                            how = partes[1] if len(partes) > 1 else "Adequar conforme NR"
+                                if v["status"] == "Não Conforme":
+                                    analise = gerar_texto_ia(p, "Não Conforme", v["obs"])
+                                    partes = analise.split("|")
+                                    why = partes[0].strip() if len(partes) > 0 else "Risco identificado"
+                                    how = partes[1].strip() if len(partes) > 1 else "Adequar conforme NR"
 
-                            imgs = [
-                                InlineImage(
-                                    doc,
-                                    io.BytesIO(fb),
-                                    width=Mm(65)
-                                )
-                                for fb in v["fotos"]
-                            ]
+                                    imgs = [
+                                        InlineImage(doc, io.BytesIO(fb), width=Mm(65))
+                                        for fb in v["fotos"] if fb
+                                    ]
 
-                            constatacoes.append({
-                                "setor": p,
-                                "nr": nr,
-                                "descricao": v["obs"],
-                                "fotos": imgs
-                            })
+                                    constatacoes.append({
+                                        "setor": p,
+                                        "nr": nr,
+                                        "descricao": v["obs"],
+                                        "fotos": imgs
+                                    })
 
-                            plano_acao.append({
-                                "pergunta": p,
-                                "why": why.strip(),
-                                "how": how.strip(),
-                                "responsavel": v["responsavel"],
-                                "prazo": v["prazo"].strftime("%d/%m/%Y")
-                            })
+                                    prazo_formatado = (
+                                        v["prazo"].strftime("%d/%m/%Y")
+                                        if isinstance(v["prazo"], (date, datetime))
+                                        else str(v["prazo"])
+                                    )
 
-                        elif v["status"] == "Conforme":
-                            conformes.append({
-                                "item": p,
-                                "obs": gerar_texto_ia(p, "Conforme")
-                            })
+                                    plano_acao.append({
+                                        "pergunta": p,
+                                        "why": why,
+                                        "how": how,
+                                        "responsavel": v["responsavel"],
+                                        "prazo": prazo_formatado
+                                    })
 
-                contexto = {
-                    "relatorio_num": rel_num,
-                    "data_inspecao": datetime.now().strftime("%d/%m/%Y"),
-                    "unidade": u_sel,
-                    "auditor_selecionado": auditor,
-                    "gerente_unidade": gerente,
-                    "empreendimento": f"Macromaq - {u_sel}",
-                    "local": UNIDADES[u_sel]["ENDERECO"],
-                    "cnpj": UNIDADES[u_sel]["CNPJ"],
-                    "constatacoes": constatacoes,
-                    "plano_acao": plano_acao,
-                    "conformes": conformes
-                }
+                                elif v["status"] == "Conforme":
+                                    conformes.append({
+                                        "item": p,
+                                        "obs": gerar_texto_ia(p, "Conforme")
+                                    })
 
-                doc.render(contexto)
-                out = io.BytesIO()
-                doc.save(out)
-                out.seek(0)
-                word_binary = out.getvalue()
+                        data_hoje = datetime.now().strftime("%d/%m/%Y")
+                        contexto = {
+                            "relatorio_num": rel_num,
+                            "data_inspecao": data_hoje,
+                            "unidade": u_sel,
+                            "auditor_selecionado": auditor,
+                            "gerente_unidade": gerente,
+                            "empreendimento": f"Macromaq - {u_sel}",
+                            "local": UNIDADES[u_sel]["ENDERECO"],
+                            "cnpj": UNIDADES[u_sel]["CNPJ"],
+                            "constatacoes": constatacoes,
+                            "plano_acao": plano_acao,
+                            "conformes": conformes
+                        }
 
-                conn = sqlite3.connect("jornada_ssma.db")
-                c = conn.cursor()
-                c.execute(
-                    """
-                    INSERT INTO inspecoes
-                    (rel_num, unidade, data, auditor, arquivo_word)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (rel_num, u_sel, datetime.now().strftime("%d/%m/%Y"), auditor, word_binary)
-                )
-                ins_id = c.lastrowid
+                        # Renderiza DOCX em memória
+                        doc.render(contexto)
+                        out = io.BytesIO()
+                        doc.save(out)
+                        out.seek(0)
+                        word_binary = out.getvalue()
 
-                for item_p in plano_acao:
-                    c.execute(
-                        """
-                        INSERT INTO plano_acao
-                        (inspecao_id, item, nr, obs, responsavel, prazo, status)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (ins_id, item_p["pergunta"], "NR", item_p["why"], item_p["responsavel"], item_p["prazo"], "Pendente")
-                    )
+                        # Converte para PDF
+                        pdf_binary = None
+                        try:
+                            pdf_binary = converter_docx_para_pdf(word_binary)
+                        except Exception as err_pdf:
+                            st.warning(f"Aviso de conversão: {err_pdf}. Disponibilizando o DOCX para download.")
 
-                conn.commit()
-                conn.close()
+                        # Salva registros no banco de dados SQLite
+                        conn = sqlite3.connect("jornada_ssma.db")
+                        c = conn.cursor()
+                        c.execute(
+                            """
+                            INSERT INTO inspecoes
+                            (rel_num, unidade, data, auditor, arquivo_word)
+                            VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (rel_num, u_sel, data_hoje, auditor, word_binary)
+                        )
+                        ins_id = c.lastrowid
 
-                st.success(f"✅ Relatório {rel_num} gerado e salvo com sucesso!")
-                st.download_button(
-                    "📥 Baixar Relatório Word",
-                    word_binary,
-                    f"Relatorio_{u_sel}_{rel_num.replace('/', '-')}.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                )
-            except Exception as e:
-                st.error(f"Erro ao processar e salvar o relatório: {e}")
+                        for item_p in plano_acao:
+                            c.execute(
+                                """
+                                INSERT INTO plano_acao
+                                (inspecao_id, item, nr, obs, responsavel, prazo, status)
+                                VALUES (?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                (ins_id, item_p["pergunta"], "NR", item_p["why"], item_p["responsavel"], item_p["prazo"], "Pendente")
+                            )
+
+                        conn.commit()
+                        conn.close()
+
+                        # Configura dados para o botão de download persistente
+                        nome_limpo = f"Relatorio_{u_sel}_{rel_num.replace('/', '-')}"
+                        if pdf_binary:
+                            st.session_state.relatorio_arquivo_pronto = pdf_binary
+                            st.session_state.relatorio_nome_arquivo = f"{nome_limpo}.pdf"
+                            st.session_state.relatorio_mime = "application/pdf"
+                        else:
+                            st.session_state.relatorio_arquivo_pronto = word_binary
+                            st.session_state.relatorio_nome_arquivo = f"{nome_limpo}.docx"
+                            st.session_state.relatorio_mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+                        st.success(f"✅ Relatório {rel_num} gravado no banco de dados!")
+                except Exception as e:
+                    st.error(f"Erro ao processar e salvar o relatório: {e}")
+
+        # O botão fica exposto fora do bloco do clique do botão de salvar
+        if st.session_state.relatorio_arquivo_pronto is not None:
+            extensao = st.session_state.relatorio_nome_arquivo.split(".")[-1].upper()
+            st.download_button(
+                label=f"📥 Baixar Relatório ({extensao})",
+                data=st.session_state.relatorio_arquivo_pronto,
+                file_name=st.session_state.relatorio_nome_arquivo,
+                mime=st.session_state.relatorio_mime,
+                type="primary"
+            )
 
     # -----------------------------------------------------
     # ABA 2 - DASHBOARD

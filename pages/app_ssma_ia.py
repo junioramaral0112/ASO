@@ -1,747 +1,319 @@
-import concurrent.futures
-from datetime import date, datetime
-import io
-import os
-import sqlite3
-
-from docx.shared import Mm
-from docxtpl import DocxTemplate, InlineImage
-import google.generativeai as genai
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
+import pandas as pd
+from datetime import datetime, timedelta
+from docx import Document
+from docx.shared import Inches, Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from io import BytesIO
+import os
+import json
+import urllib.request
+from PIL import Image
+import base64
+import unicodedata
+from urllib.parse import unquote
 
 # =========================================================
-# CONFIGURAÇÃO GEMINI IA
+# CONFIGURAÇÃO DE CAMINHOS E WEBHOOK DO APPS SCRIPT
 # =========================================================
-api_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
-model = None
 
-if api_key:
+BASE_DIR = os.path.dirname(__file__) if "__file__" in locals() else "."
+
+APPS_SCRIPT_WEBHOOK_URL = "https://script.google.com/a/macros/macromaq.com.br/s/AKfycbyNCchIjNTiUna4cWlyDOJr8KYqpYDBdNqormPb91d_xYnOu7L1lxrZDAL4q0I2lwux/exec"
+
+def localizar_arquivo(caminho_local, nome_arquivo):
+    if os.path.exists(caminho_local):
+        return caminho_local
+    caminho_projeto = os.path.join(BASE_DIR, nome_arquivo)
+    return caminho_projeto if os.path.exists(caminho_projeto) else None
+
+PATH_ASO_IMG = localizar_arquivo(r"C:\Users\dilceu.gomes\Desktop\sistema_aso\ASO.png", "ASO.png")
+PATH_LOGO = localizar_arquivo(r"C:\Users\dilceu.gomes\Desktop\sistema_aso\logo.png", "logo.png")
+PATH_LOGO_DOC = localizar_arquivo(r"C:\Users\dilceu.gomes\Desktop\sistema_aso\adivitta.png", "adivitta.png")
+PATH_AGENDAMENTOS_JSON = os.path.join(BASE_DIR, "agendamentos_persistentes.json")
+
+def carregar_imagem_base64(path):
+    if path and os.path.exists(path):
+        with open(path, "rb") as img_file:
+            return base64.b64encode(img_file.read()).decode()
+    return None
+
+def normalizar_texto(texto):
+    if not isinstance(texto, str):
+        return ""
+    texto = unicodedata.normalize("NFKD", texto).encode("ASCII", "ignore").decode("ASCII")
+    return texto.strip().upper()
+
+# =========================================================
+# PERSISTÊNCIA LOCAL E ENVIO DE DADOS (APPS SCRIPT)
+# =========================================================
+
+def ler_banco_agendamentos():
+    if os.path.exists(PATH_AGENDAMENTOS_JSON):
+        try:
+            with open(PATH_AGENDAMENTOS_JSON, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def gravar_agendamento(chave, dados):
+    banco = ler_banco_agendamentos()
+    banco[chave] = dados
     try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-flash")
-    except Exception:
-        model = None
+        with open(PATH_AGENDAMENTOS_JSON, "w", encoding="utf-8") as f:
+            json.dump(banco, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        st.error(f"Erro ao salvar localmente: {e}")
 
-PATH_BASE = os.path.dirname(__file__) if "__file__" in locals() else "."
-
-
-def _chamar_api_gemini(prompt: str) -> str:
-    if not model:
-        raise RuntimeError("Modelo Gemini não configurado.")
-    response = model.generate_content(prompt)
-    return response.text.strip()
-
-
-def gerar_texto_ia(pergunta: str, diagnostico: str = "") -> str:
-    """Gera justificativa e ação corretiva com limite de 5s para não travar a aplicação."""
-    texto_padrao = f"Risco identificado: {diagnostico} | Realizar adequação imediata conforme Norma Regulamentadora."
-    if not api_key or not model:
-        return texto_padrao
-
-    prompt = (
-        f"Você é um especialista SSMA. Analise o seguinte desvio de campo:\n"
-        f"Item: {pergunta}\n"
-        f"Diagnóstico: {diagnostico}\n"
-        f"Responda EXATAMENTE no formato: JUSTIFICATIVA | AÇÃO CORRETIVA"
-    )
-
+def enviar_webhook_planilha(payload):
+    """Envia requisição para o Google Apps Script e trata redirecionamento."""
+    if not APPS_SCRIPT_WEBHOOK_URL or not APPS_SCRIPT_WEBHOOK_URL.startswith("http"):
+        return {"status": "erro", "mensagem": "URL do Apps Script não preenchida em APPS_SCRIPT_WEBHOOK_URL"}
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            futuro = executor.submit(_chamar_api_gemini, prompt)
-            return futuro.result(timeout=5)
-    except Exception:
-        return texto_padrao
-
-
-# =========================================================
-# BANCO DE DADOS
-# =========================================================
-DB_NAME = "jornada_ssma.db"
-
-
-def init_db():
-    with sqlite3.connect(DB_NAME) as conn:
-        c = conn.cursor()
-        c.execute(
-            """
-            CREATE TABLE IF NOT EXISTS inspecoes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                rel_num TEXT,
-                unidade TEXT,
-                data TEXT,
-                auditor TEXT,
-                arquivo_word BLOB
-            )
-        """
+        dados_json = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            APPS_SCRIPT_WEBHOOK_URL,
+            data=dados_json,
+            headers={"Content-Type": "application/json"}
         )
-        c.execute(
-            """
-            CREATE TABLE IF NOT EXISTS plano_acao (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                inspecao_id INTEGER,
-                item TEXT,
-                nr TEXT,
-                obs TEXT,
-                foto_antes BLOB,
-                foto_depois BLOB,
-                responsavel TEXT,
-                prazo TEXT,
-                status TEXT
-            )
-        """
-        )
-        conn.commit()
+        opener = urllib.request.build_opener()
+        with opener.open(req, timeout=12) as response:
+            res_text = response.read().decode("utf-8")
+            try:
+                return json.loads(res_text)
+            except Exception:
+                return {"status": "sucesso"}
+    except Exception as ex:
+        return {"status": "erro", "mensagem": str(ex)}
 
-
-def get_next_rel_num() -> str:
-    ano = datetime.now().year
+def remover_agendamento(chave, payload_sync=None):
+    banco = ler_banco_agendamentos()
+    banco[chave] = {"status": False, "data": "", "hora": "", "obs": ""}
     try:
-        with sqlite3.connect(DB_NAME) as conn:
-            c = conn.cursor()
-            c.execute(
-                "SELECT COUNT(*) FROM inspecoes WHERE rel_num LIKE ?",
-                (f"%/{ano}",),
-            )
-            count = c.fetchone()[0]
-            return f"{(count + 1):04d}/{ano}"
-    except Exception:
-        return f"0001/{ano}"
-
+        with open(PATH_AGENDAMENTOS_JSON, "w", encoding="utf-8") as f:
+            json.dump(banco, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        st.error(f"Erro ao atualizar: {e}")
+    if payload_sync:
+        enviar_webhook_planilha(payload_sync)
 
 # =========================================================
-# CONFIGURAÇÕES DE NEGÓCIO - FILIAIS E CHECKLIST
+# CONFIGURAÇÃO DA PÁGINA
 # =========================================================
+
+try:
+    if PATH_ASO_IMG:
+        page_icon = Image.open(PATH_ASO_IMG)
+    else:
+        page_icon = "🛡️"
+except Exception:
+    page_icon = "🛡️"
+
+st.set_page_config(
+    page_title="Gestão ASO Pro",
+    layout="wide",
+    page_icon=page_icon
+)
+
+# =========================================================
+# CSS GLOBAL E CABEÇALHO
+# =========================================================
+
+aso_base64 = carregar_imagem_base64(PATH_ASO_IMG)
+
+st.markdown(f"""
+<style>
+[data-testid="stSidebarNav"] {{display: none !important;}}
+.stApp {{ background-color: #f1f5f9; }}
+section[data-testid="stSidebar"] {{ background: linear-gradient(180deg, #8390a8, #1e293b); }}
+section[data-testid="stSidebar"] label, section[data-testid="stSidebar"] p {{ color: white !important; }}
+div[data-testid="metric-container"] {{ background: white; border-radius: 18px; padding: 15px; border: 1px solid #e2e8f0; box-shadow: 0 4px 18px rgba(0,0,0,0.06); }}
+
+.stDownloadButton button {{ width: 100%; background: linear-gradient(90deg, #2563eb, #1d4ed8); color: white; border-radius: 12px; font-weight: bold; }}
+
+section[data-testid="stSidebar"] .stButton > button {{
+    background-color: #2563eb !important;
+    color: white !important;
+    border-radius: 12px !important;
+    border: 1px solid rgba(255,255,255,0.3) !important;
+    font-weight: bold !important;
+    height: 45px !important;
+    transition: 0.3s;
+}}
+
+.footer {{ position: fixed; left: 0; bottom: 0; width: 100%; background: rgba(0,0,0,0.8); color: white; text-align: center; padding: 10px; font-size: 13px; z-index: 999; }}
+
+.menu-titulo {{
+    color: white;
+    font-weight: bold;
+    font-size: 14px;
+    margin-top: 20px;
+    margin-bottom: 10px;
+    border-bottom: 1px solid rgba(255,255,255,0.2);
+    padding-bottom: 5px;
+}}
+
+.header-wrapper {{
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    margin-bottom: 5px;
+}}
+.main-title {{
+    font-size: 40px;
+    font-weight: 800;
+    color: #111827;
+    margin: 0;
+}}
+.sub-title {{
+    color: #64748b;
+    margin-bottom: 25px;
+    margin-left: 120px;
+}}
+</style>
+
+<div class="header-wrapper">
+    {"<img src='data:image/png;base64," + aso_base64 + "' width='100'>" if aso_base64 else "🛡️"}
+    <h1 class="main-title">Gestão ASO Pro</h1>
+</div>
+<div class="sub-title">Sistema Inteligente de Gestão de ASO</div>
+""", unsafe_allow_html=True)
+
+# =========================================================
+# LÓGICA DE DADOS (MAPEAMENTO RESILIENTE)
+# =========================================================
+
+SHEET_ID = "1G_oVT9gK-n_jGh5R4g65qUwK_MfQGvCX-SA4NHNNflU"
+
 UNIDADES = {
-    "SÃO JOSÉ (MATRIZ)": {
-        "CNPJ": "83.675.413/0001-01",
-        "ENDERECO": "BR 101, km 210 / Bairro: Picadas do Sul – São José – SC",
-    },
-    "CHAPECÓ": {
-        "CNPJ": "83.675.413/0002-84",
-        "ENDERECO": "Rua Xanxerê, 360E – Bairro Líder – Chapecó – SC",
-    },
-    "CRICIÚMA": {
-        "CNPJ": "83.675.413/0003-65",
-        "ENDERECO": "Rodovia Jorge Lacerda, 4555 – Bairro Sangão – Criciúma – SC",
-    },
-    "LAGES": {
-        "CNPJ": "83.675.413/0004-46",
-        "ENDERECO": "Av. Dom Pedro II, 2887 – São Cristóvão – Lages – SC",
-    },
-    "CURITIBA": {
-        "CNPJ": "83.675.413/0005-27",
-        "ENDERECO": (
-            "BR 116 (Linha Verde), 17350 – Pinheirinho – Curitiba – PR"
-        ),
-    },
-    "CASCAVEL": {
-        "CNPJ": "83.675.413/0006-08",
-        "ENDERECO": "BR 277, Km 594 – Trevo Cataratas – Cascavel – PR",
-    },
-    "LONDRINA": {
-        "CNPJ": "83.675.413/0007-90",
-        "ENDERECO": "Av. Tiradentes, 5500 – Jardim Rosicler – Londrina – PR",
-    },
-    "PORTO ALEGRE": {
-        "CNPJ": "83.675.413/0008-71",
-        "ENDERECO": "Av. Severo Dullius, 1395 – São João – Porto Alegre – RS",
-    },
-    "PASSO FUNDO": {
-        "CNPJ": "83.675.413/0009-52",
-        "ENDERECO": (
-            "RS 153, Km 02 – Nossa Senhora Aparecida – Passo Fundo – RS"
-        ),
-    },
-    "CAXIAS DO SUL": {
-        "CNPJ": "83.675.413/0010-94",
-        "ENDERECO": "BR 116, Km 144 – São Ciro – Caxias do Sul – RS",
-    },
-    "JOINVILLE": {
-        "CNPJ": "83.675.413/0011-75",
-        "ENDERECO": "BR 101, KM 17 – Pirabeiraba – Joinville – SC",
-    },
-    "MARINGÁ": {
-        "CNPJ": "83.675.413/0012-56",
-        "ENDERECO": "PR-317, Km 05 – Parque Industrial – Maringá – PR",
-    },
-    "PELOTAS": {
-        "CNPJ": "83.675.413/0013-37",
-        "ENDERECO": "BR 116, Km 524 – Três Vendas – Pelotas – RS",
-    },
-    "SANTA MARIA": {
-        "CNPJ": "83.675.413/0014-18",
-        "ENDERECO": "BR 287, Km 242 – Camobi – Santa Maria – RS",
-    },
+    "C-CHP": "1201656811",  # Chapecó
+    "C-CTBA": "145843404",   # Curitiba
+    "S-SJ": "1712391604",    # São José
+    "D-MG": "1071212860",    # Minas Gerais
+    "D-MS": "1260438020",    # Mato Grosso do Sul
+    "D-SP": "1323067532"     # São Paulo
 }
 
-TEMAS_CHECKLIST = {
-    "Módulo Operacional": {
-        "NR-12: Proteções em partes móveis/transmissão?": "NR 12",
-        "NR-13: Vaso de pressão com teste hidrostático válido?": "NR 13",
-        "Certificação: Elevação com selo de carga/revisão?": "NR 11",
-        "Apoio: Uso de cavaletes após levantamento?": "NR 11",
-        "Pneus: Gaiola de proteção para enchimento disponível?": "NR 12",
-        "Bloqueio LOTO: Freio/travas em manutenções?": "NR 12",
-        "Ferramentas Manuais: Livres de improvisos/gambiarras?": "NR 12",
-        "Ferramentas Elétricas: Cabos/plugs íntegros?": "NR 10",
-        "Espaçamento: Mínimo 60cm entre talhas e equipamentos?": "NR 11",
-        "Documentação: I.T./LUP disponíveis no setor?": "Gestão",
-    },
-    "Módulo Ambiental": {
-        "FDS (FISPQs): Disponíveis e atualizadas?": "NR 26",
-        "Identificação: Químicos rotulados corretamente?": "NR 26",
-        "Contenção: Kit de derramamento completo?": "NR 20",
-        "Armazenamento: Inflamáveis longe de calor/faíscas?": "NR 20",
-        "Resíduos: Descarte de óleos via logística reversa?": "CONAMA",
-        "5S: Piso livre de óleo, graxa ou lixo industrial?": "NR 17",
-        "Coleta Seletiva: Lixeiras identificadas e esvaziadas?": "Gestão",
-        "Organização: Mezaninos sem sobrecarga?": "NR 11",
-        "Higiene: Lava-olhos higienizado e funcional?": "NR 24",
-        "EPI Químico: Proteção ocular/luvas disponíveis?": "NR 06",
-    },
-    "Módulo Infraestrutura": {
-        "Treinamento: Executores com Integração em dia?": "NR 01",
-        "NR-23: Extintores desobstruídos e com pressão?": "NR 23",
-        "Emergência: Saídas e corredores livres?": "NR 23",
-        "Quedas: Fossos/mezaninos com guarda-corpo?": "NR 12",
-        "Escadas: Corrimão e fita antiderrapante?": "NR 12",
-        "Elétrica: Painéis fechados e área de 1m livre?": "NR 10",
-        "Iluminação: Adequada para a atividade?": "NR 17",
-        "Ergonomia: Riscos de posturas/cargas?": "NR 17",
-        "Primeiros Socorros: Maleta na validade?": "NR 07",
-        "Acesso: Entrada de não autorizados controlada?": "Gestão",
-    },
-}
+@st.cache_data(ttl=15)
+def load_data(gid):
+    url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={str(gid).strip()}"
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as resp:
+            df = pd.read_csv(resp)
 
+        # 1. Limpeza de espaços em branco e quebras de linha em todos os cabeçalhos
+        df.columns = [str(c).replace("\n", " ").strip() for c in df.columns]
 
-# =========================================================
-# APLICAÇÃO PRINCIPAL
-# =========================================================
-def main():
-    st.set_page_config(page_title="Gestão SSMA Macromaq", layout="wide")
-    init_db()
+        # 2. Padronização automática de cabeçalhos
+        for c in list(df.columns):
+            c_upper = c.upper()
+            if c_upper in ["VENC", "VENCIMENTO", "VENC.", "DATA VENCIMENTO", "DATA DE VENCIMENTO"]:
+                df.rename(columns={c: "Venc"}, inplace=True)
+            elif c_upper in ["NOME", "COLABORADOR", "FUNCIONARIO", "NOME COMPLETO"]:
+                df.rename(columns={c: "Nome"}, inplace=True)
+            elif c_upper in ["DATA ASO", "ASO", "ULTIMO ASO", "DATA DO ASO"]:
+                df.rename(columns={c: "Data ASO"}, inplace=True)
+            elif c_upper in ["CARGO", "FUNCAO"]:
+                df.rename(columns={c: "Cargo"}, inplace=True)
+            elif c_upper in ["SETOR", "DEPARTAMENTO", "DPTO"]:
+                df.rename(columns={c: "Setor"}, inplace=True)
+            elif c_upper in ["AGENDAMENTO", "STATUS AGENDAMENTO"]:
+                df.rename(columns={c: "Agendamento"}, inplace=True)
 
-    menu = [
-        "📋 Nova Inspeção",
-        "📊 Indicadores SSMA",
-        "✅ Tratativas por Unidade",
-        "📂 Histórico de Relatórios",
+        if "Nome" in df.columns:
+            df = df.dropna(subset=["Nome"]).copy()
+            df["Nome"] = df["Nome"].astype(str).str.strip()
+            df = df[df["Nome"] != ""]
+            df = df[df["Nome"].str.lower() != "nan"]
+            df = df[df["Nome"].str.lower() != "none"]
+
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+@st.cache_data(ttl=15)
+def carregar_base_completa():
+    frames = []
+    for u_nome, gid in UNIDADES.items():
+        d = load_data(gid)
+        if not d.empty and "Nome" in d.columns:
+            d["UNIDADE_REAL"] = u_nome
+            frames.append(d)
+    if frames:
+        return pd.concat(frames, ignore_index=True)
+    return pd.DataFrame()
+
+def gerar_docx(dados, tipo, data_sugestao, unidade_padrao="MACROMAQ"):
+    doc = Document()
+    if PATH_LOGO_DOC and os.path.exists(PATH_LOGO_DOC):
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.add_run().add_picture(PATH_LOGO_DOC, width=Inches(1.2))
+
+    titulo = doc.add_paragraph()
+    titulo.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = titulo.add_run(f"FORMULÁRIO PARA AGENDAMENTO {tipo}")
+    run.bold, run.font.size = True, Pt(16)
+
+    table = doc.add_table(rows=7, cols=2)
+    table.style = "Table Grid"
+    labels = ["Nome Completo", "Cargo", "Setor", "Unidade", "Cliente", "Local", "Data Sugestão"]
+
+    nome_val = str(dados.get("Nome", "")).strip() if pd.notna(dados.get("Nome")) else ""
+    cargo_val = str(dados.get("Cargo", "")).strip() if pd.notna(dados.get("Cargo")) else ""
+    setor_val = str(dados.get("Setor", "")).strip() if pd.notna(dados.get("Setor")) else ""
+    unid_val = str(dados.get("UNIDADE", dados.get("UNIDADE_REAL", unidade_padrao))).strip()
+
+    valores = [
+        nome_val,
+        cargo_val,
+        setor_val,
+        unid_val,
+        "MACROMAQ",
+        "Arapoti",
+        data_sugestao.strftime("%d/%m/%Y")
     ]
 
-    choice = st.sidebar.selectbox("Navegação", menu)
+    for i, (l, v) in enumerate(zip(labels, valores)):
+        table.rows[i].cells[0].text, table.rows[i].cells[1].text = l, v
+        table.rows[i].cells[0].paragraphs[0].runs[0].bold = True
 
-    # -----------------------------------------------------
-    # ABA 1 - NOVA INSPEÇÃO
-    # -----------------------------------------------------
-    if choice == "📋 Nova Inspeção":
-        col_icon, col_text = st.columns([0.1, 0.9])
-        with col_icon:
-            icone_caminho = os.path.join(PATH_BASE, "Auditoria - ícon.png")
-            if os.path.exists(icone_caminho):
-                st.image(icone_caminho, width=70)
-            else:
-                st.markdown("## 📋")
+    target = BytesIO()
+    doc.save(target)
+    return target.getvalue()
 
-        with col_text:
-            st.title("Auditoria de Visita Técnica SSMA")
+def renderizar_card_e_agendamento(row, unidade_nome, idx_chave, banco_ag, hoje):
+    nome_str = str(row["Nome"]).strip()
+    cargo_str = str(row.get("Cargo", "Não informado")) if pd.notna(row.get("Cargo")) and str(row.get("Cargo")).strip() != "" else "Não informado"
+    setor_str = str(row.get("Setor", "Não informado")) if pd.notna(row.get("Setor")) and str(row.get("Setor")).strip() != "" else "Não informado"
 
-        with st.sidebar:
-            u_sel = st.selectbox("Unidade", list(UNIDADES.keys()))
-            auditor = st.selectbox(
-                "Auditor",
-                ["Jessica Vieira", "Dilceu Amaral Jr", "Simone Francisco"],
-            )
-            rel_num = st.text_input(
-                "Nº Relatório", value=get_next_rel_num(), disabled=True
-            )
-            gerente = st.text_input("Gerente da Unidade", "Deveide Mafra")
+    data_aso_val = str(row.get("Data ASO", "")).strip()
 
-        if "auditoria" not in st.session_state:
-            st.session_state.auditoria = {
-                p: {
-                    "status": "Conforme",
-                    "fotos": [],
-                    "obs": "",
-                    "prazo": date.today(),
-                    "responsavel": "Guilherme Almeida",
-                }
-                for tema in TEMAS_CHECKLIST.values()
-                for p in tema.keys()
-            }
+    venc_dt = pd.to_datetime(row.get("Venc"), dayfirst=True, errors="coerce")
+    if pd.notna(venc_dt):
+        dias = int((venc_dt - hoje).days)
+        venc_str = venc_dt.strftime("%d/%m/%Y")
+    else:
+        dias = 9999
+        venc_str = "Não informada"
 
-        if "docx_pronto" not in st.session_state:
-            st.session_state.docx_pronto = None
-        if "docx_nome" not in st.session_state:
-            st.session_state.docx_nome = ""
+    chave_registro = f"{unidade_nome}_{nome_str}_{venc_str.replace('/', '-')}"
+    dados_locais = banco_ag.get(chave_registro, None)
 
-        # Formulário do Checklist
-        for tema, itens in TEMAS_CHECKLIST.items():
-            with st.expander(f"📁 {tema}", expanded=True):
-                for pergunta, nr in itens.items():
-                    res = st.radio(
-                        f"**{pergunta}**",
-                        ["Conforme", "Não Conforme", "Não Aplica"],
-                        horizontal=True,
-                        key=f"r_{pergunta}",
-                    )
-                    st.session_state.auditoria[pergunta]["status"] = res
+    agendado_ativo = False
+    texto_detalhe_agendamento = ""
 
-                    if res == "Não Conforme":
-                        fotos = st.file_uploader(
-                            "Fotos da Evidência",
-                            type=["png", "jpg", "jpeg"],
-                            accept_multiple_files=True,
-                            key=f"up_{pergunta}",
-                        )
-                        if fotos:
-                            st.session_state.auditoria[pergunta]["fotos"] = [
-                                f.getvalue() for f in fotos
-                            ]
-
-                        st.session_state.auditoria[pergunta]["obs"] = (
-                            st.text_area(
-                                "Diagnóstico / Apontamento:",
-                                key=f"obs_{pergunta}",
-                            )
-                        )
-                        st.session_state.auditoria[pergunta]["responsavel"] = (
-                            st.selectbox(
-                                "Responsável:",
-                                ["Guilherme Almeida", "Luiz", "Deveide Mafra"],
-                                key=f"resp_{pergunta}",
-                            )
-                        )
-                        st.session_state.auditoria[pergunta]["prazo"] = (
-                            st.date_input(
-                                "Prazo Limite:", key=f"praz_{pergunta}"
-                            )
-                        )
-                    st.divider()
-
-        # Botão de emissão
-        if st.button("🚀 FINALIZAR E SALVAR RELATÓRIO", type="primary"):
-            caminho_template = os.path.join(
-                PATH_BASE, "JORNADA_SSMA_Template.docx"
-            )
-            if not os.path.exists(caminho_template):
-                st.error(
-                    f"Ficheiro de modelo não encontrado: '{caminho_template}'. Verifique a raiz do repositório."
-                )
-            else:
-                with st.status(
-                    "A processar e a gerar relatório...", expanded=True
-                ) as status_box:
-                    try:
-                        status_box.write(
-                            "Passo 1/3: A recolher respostas e a formatar itens..."
-                        )
-                        doc = DocxTemplate(caminho_template)
-                        plano_acao = []
-                        conformes = []
-                        constatacoes = []
-
-                        for t, its in TEMAS_CHECKLIST.items():
-                            for p, nr in its.items():
-                                v = st.session_state.auditoria[p]
-
-                                if v["status"] == "Não Conforme":
-                                    obs_limpa = (
-                                        v["obs"].strip()
-                                        if v["obs"]
-                                        else "Não especificado"
-                                    )
-
-                                    if obs_limpa != "Não especificado":
-                                        analise = gerar_texto_ia(p, obs_limpa)
-                                    else:
-                                        analise = "Risco identificado | Realizar adequação conforme NR"
-
-                                    partes = analise.split("|")
-                                    why = (
-                                        partes[0].strip()
-                                        if len(partes) > 0
-                                        else "Risco identificado"
-                                    )
-                                    how = (
-                                        partes[1].strip()
-                                        if len(partes) > 1
-                                        else "Adequar conforme NR"
-                                    )
-
-                                    imgs = [
-                                        InlineImage(
-                                            doc, io.BytesIO(fb), width=Mm(65)
-                                        )
-                                        for fb in v["fotos"]
-                                        if fb
-                                    ]
-
-                                    constatacoes.append({
-                                        "setor": p,
-                                        "nr": nr,
-                                        "descricao": obs_limpa,
-                                        "fotos": imgs,
-                                    })
-
-                                    prazo_formatado = (
-                                        v["prazo"].strftime("%d/%m/%Y")
-                                        if isinstance(
-                                            v["prazo"], (date, datetime)
-                                        )
-                                        else str(v["prazo"])
-                                    )
-
-                                    plano_acao.append({
-                                        "pergunta": p,
-                                        "why": why,
-                                        "how": how,
-                                        "responsavel": v["responsavel"],
-                                        "prazo": prazo_formatado,
-                                    })
-
-                                elif v["status"] == "Conforme":
-                                    conformes.append({
-                                        "item": p,
-                                        "obs": "Item verificado em conformidade com as diretrizes e requisitos de SSMA.",
-                                    })
-
-                        data_hoje = datetime.now().strftime("%d/%m/%Y")
-                        contexto = {
-                            "relatorio_num": rel_num,
-                            "data_inspecao": data_hoje,
-                            "unidade": u_sel,
-                            "auditor_selecionado": auditor,
-                            "gerente_unidade": gerente,
-                            "empreendimento": f"Macromaq - {u_sel}",
-                            "local": UNIDADES[u_sel]["ENDERECO"],
-                            "cnpj": UNIDADES[u_sel]["CNPJ"],
-                            "constatacoes": constatacoes,
-                            "plano_acao": plano_acao,
-                            "conformes": conformes,
-                        }
-
-                        status_box.write(
-                            "Passo 2/3: A preencher ficheiro Word (.docx)..."
-                        )
-                        doc.render(contexto)
-                        out = io.BytesIO()
-                        doc.save(out)
-                        out.seek(0)
-                        word_binary = out.getvalue()
-
-                        status_box.write(
-                            "Passo 3/3: A gravar na base de dados SQLite..."
-                        )
-                        with sqlite3.connect(DB_NAME) as conn:
-                            c = conn.cursor()
-                            c.execute(
-                                """
-                                INSERT INTO inspecoes (rel_num, unidade, data, auditor, arquivo_word)
-                                VALUES (?, ?, ?, ?, ?)
-                                """,
-                                (
-                                    rel_num,
-                                    u_sel,
-                                    data_hoje,
-                                    auditor,
-                                    word_binary,
-                                ),
-                            )
-                            ins_id = c.lastrowid
-
-                            for item_p in plano_acao:
-                                c.execute(
-                                    """
-                                    INSERT INTO plano_acao (inspecao_id, item, nr, obs, responsavel, prazo, status)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                                    """,
-                                    (
-                                        ins_id,
-                                        item_p["pergunta"],
-                                        "NR",
-                                        item_p["why"],
-                                        item_p["responsavel"],
-                                        item_p["prazo"],
-                                        "Pendente",
-                                    ),
-                                )
-                            conn.commit()
-
-                        st.session_state.docx_pronto = word_binary
-                        st.session_state.docx_nome = f"Relatorio_{u_sel}_{rel_num.replace('/', '-')}.docx"
-                        status_box.update(
-                            label="Relatório finalizado com sucesso!",
-                            state="complete",
-                            expanded=False,
-                        )
-                        st.success(
-                            f"✅ Relatório {rel_num} pronto para descarregar!"
-                        )
-
-                    except Exception as e:
-                        status_box.update(
-                            label="Falha no processo!",
-                            state="error",
-                            expanded=True,
-                        )
-                        st.error(f"Erro detalhado: {e}")
-
-        # Botão de download
-        if st.session_state.docx_pronto is not None:
-            st.download_button(
-                label=(
-                    f"📥 Descarregar Relatório Word"
-                    f" ({st.session_state.docx_nome})"
-                ),
-                data=st.session_state.docx_pronto,
-                file_name=st.session_state.docx_nome,
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                type="primary",
-            )
-
-    # -----------------------------------------------------
-    # ABA 2 - INDICADORES
-    # -----------------------------------------------------
-    elif choice == "📊 Indicadores SSMA":
-        st.markdown(
-            "<h1 style='text-align: center; color: #1c3d5a;'>Dashboard"
-            " Executivo SSMA</h1>",
-            unsafe_allow_html=True,
-        )
-
-        try:
-            with sqlite3.connect(DB_NAME) as conn:
-                df = pd.read_sql_query(
-                    """
-                    SELECT p.*, i.unidade, i.data as data_auditoria
-                    FROM plano_acao p
-                    JOIN inspecoes i ON p.inspecao_id = i.id
-                    """,
-                    conn,
-                )
-        except Exception:
-            df = pd.DataFrame()
-
-        if not df.empty:
-            df["data_auditoria"] = pd.to_datetime(
-                df["data_auditoria"], dayfirst=True
-            )
-
-            with st.sidebar:
-                st.header("Filtros")
-                u_f = st.selectbox(
-                    "Unidade:", ["TODAS"] + list(UNIDADES.keys())
-                )
-                d_ini = st.date_input("Data Início:", df["data_auditoria"].min())
-                d_fim = st.date_input("Data Fim:", date.today())
-
-            mask = (df["data_auditoria"].dt.date >= d_ini) & (
-                df["data_auditoria"].dt.date <= d_fim
-            )
-            if u_f != "TODAS":
-                mask &= df["unidade"] == u_f
-            df = df[mask]
-
-            total_p = len(df)
-            resolvidos = len(df[df["status"] == "Concluído"])
-            eficacia = (resolvidos / total_p * 100) if total_p > 0 else 0
-
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                fig = go.Figure(
-                    go.Indicator(
-                        mode="gauge+number",
-                        value=eficacia,
-                        title={"text": "Eficácia (%)"},
-                        gauge={"bar": {"color": "#2ecc71"}},
-                    )
-                )
-                st.plotly_chart(fig, use_container_width=True)
-
-            with c2:
-                st.markdown(
-                    f"""
-                    <div style='background-color:white; padding:20px; border-radius:10px; border-left: 8px solid #e74c3c; text-align:center;'>
-                        <h4 style='margin:0; color:#555;'>Pendências Abertas</h4>
-                        <h1 style='margin:0; color:#e74c3c; font-size:48px;'>{total_p - resolvidos}</h1>
-                    </div>
-                """,
-                    unsafe_allow_html=True,
-                )
-
-            with c3:
-                st.markdown(
-                    f"""
-                    <div style='background-color:white; padding:20px; border-radius:10px; border-left: 8px solid #2ecc71; text-align:center;'>
-                        <h4 style='margin:0; color:#555;'>Ações Concluídas</h4>
-                        <h1 style='margin:0; color:#2ecc71; font-size:48px;'>{resolvidos}</h1>
-                    </div>
-                """,
-                    unsafe_allow_html=True,
-                )
-
-            st.divider()
-            ca, cb = st.columns([1.2, 0.8])
-
-            with ca:
-                st.write("### Ocorrências por Unidade")
-                fig_bar = px.histogram(
-                    df,
-                    x="unidade",
-                    color="status",
-                    barmode="group",
-                    color_discrete_map={
-                        "Pendente": "#e74c3c",
-                        "Concluído": "#2ecc71",
-                    },
-                )
-                st.plotly_chart(fig_bar, use_container_width=True)
-
-            with cb:
-                st.write("### Distribuição dos Status")
-                fig_p = px.pie(
-                    df,
-                    names="status",
-                    hole=0.5,
-                    color="status",
-                    color_discrete_map={
-                        "Pendente": "#e74c3c",
-                        "Concluído": "#2ecc71",
-                    },
-                )
-                st.plotly_chart(fig_p, use_container_width=True)
-        else:
-            st.info("Nenhuma inspeção registada de momento.")
-
-    # -----------------------------------------------------
-    # ABA 3 - TRATATIVAS
-    # -----------------------------------------------------
-    elif choice == "✅ Tratativas por Unidade":
-        col_f1, col_f2 = st.columns([0.1, 0.9])
-        with col_f1:
-            icone_follow = os.path.join(PATH_BASE, "Follow UP - Icon.png")
-            if os.path.exists(icone_follow):
-                st.image(icone_follow, width=70)
-            else:
-                st.markdown("## 🔄")
-        with col_f2:
-            st.title("Follow-up de Pendências")
-
-        try:
-            with sqlite3.connect(DB_NAME) as conn:
-                df_p = pd.read_sql_query(
-                    """
-                    SELECT p.*, i.unidade
-                    FROM plano_acao p
-                    JOIN inspecoes i ON p.inspecao_id = i.id
-                    WHERE p.status = 'Pendente'
-                    """,
-                    conn,
-                )
-
-                if not df_p.empty:
-                    unidades_disponiveis = df_p["unidade"].unique()
-                    u_f = st.selectbox(
-                        "Selecione a Unidade:", unidades_disponiveis
-                    )
-                    itens_filtrados = df_p[df_p["unidade"] == u_f]
-
-                    for _, row in itens_filtrados.iterrows():
-                        with st.expander(
-                            f"📌 {row['item']} | Prazo: {row['prazo']}"
-                        ):
-                            st.error(f"**Diagnóstico:** {row['obs']}")
-                            st.write(f"**Responsável:** {row['responsavel']}")
-                            f_dep = st.file_uploader(
-                                "Anexar Comprovativo / Foto de Baixa"
-                                f" #{row['id']}",
-                                key=f"f_{row['id']}",
-                            )
-
-                            if st.button(
-                                f"Concluir Pendência #{row['id']}",
-                                type="primary",
-                                key=f"btn_{row['id']}",
-                            ):
-                                foto_bytes = f_dep.getvalue() if f_dep else None
-                                cursor = conn.cursor()
-                                cursor.execute(
-                                    """
-                                    UPDATE plano_acao
-                                    SET status='Concluído', foto_depois=?
-                                    WHERE id=?
-                                    """,
-                                    (foto_bytes, row["id"]),
-                                )
-                                conn.commit()
-                                st.success(
-                                    f"Item #{row['id']} concluído com sucesso!"
-                                )
-                                st.rerun()
-                else:
-                    st.success(
-                        "🎉 Todas as unidades estão 100% em conformidade!"
-                        " Nenhuma pendência aberta."
-                    )
-        except Exception as e:
-            st.error(f"Erro ao carregar pendências: {e}")
-
-    # -----------------------------------------------------
-    # ABA 4 - HISTÓRICO
-    # -----------------------------------------------------
-    elif choice == "📂 Histórico de Relatórios":
-        col_h1, col_h2 = st.columns([0.1, 0.9])
-        with col_h1:
-            icone_hist = os.path.join(PATH_BASE, "Auditoria - ícon.png")
-            if os.path.exists(icone_hist):
-                st.image(icone_hist, width=70)
-            else:
-                st.markdown("## 📂")
-        with col_h2:
-            st.title("Histórico de Relatórios")
-
-        try:
-            with sqlite3.connect(DB_NAME) as conn:
-                df_hist = pd.read_sql_query(
-                    """
-                    SELECT id, rel_num, unidade, data, auditor
-                    FROM inspecoes
-                    ORDER BY id DESC
-                    """,
-                    conn,
-                )
-
-                if not df_hist.empty:
-                    for _, row in df_hist.iterrows():
-                        c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
-                        c1.write(f"**Nº:** {row['rel_num']}")
-                        c2.write(f"**Unidade:** {row['unidade']}")
-                        c3.write(f"**Data:** {row['data']}")
-
-                        cursor = conn.cursor()
-                        cursor.execute(
-                            "SELECT arquivo_word FROM inspecoes WHERE id=?",
-                            (row["id"],),
-                        )
-                        dado = cursor.fetchone()
-                        blob = dado[0] if dado else None
-
-                        if blob:
-                            c4.download_button(
-                                "📥 Descarregar DOCX",
-                                blob,
-                                f"Relatorio_{row['rel_num'].replace('/', '-')}.docx",
-                                key=f"h_{row['id']}",
-                            )
-                        st.divider()
-                else:
-                    st.info("Nenhum relatório emitido até ao momento.")
-        except Exception:
-            st.info("Histórico ainda vazio.")
-
-
-if __name__ == "__main__":
-    main()
+    if dados_locais is not None:
+        agendado_ativo = bool(dados_locais.get("status", False))
+        data_salva = dados_locais.get("data", "")
+        hora_salva = dados_locais.get("hora", "")
+        obs_salva = dados_locais.get("obs", "")
+        if agendado_ativo:
+            texto_detalhe_agendamento = f"🗓 <b>Agendado:</b> {data_salva}" + (f" às {hora_salva}" if hora_salva else "")
+            if obs_salva:
+                texto_detalhe_agendamento += f"<br>📝 <b>Obs:</b> {obs_salva}"
+    else:
+        if "Agendamento" in row.index and pd.notna(

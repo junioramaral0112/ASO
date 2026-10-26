@@ -190,12 +190,12 @@ SHEET_ID = "1G_oVT9gK-n_jGh5R4g65qUwK_MfQGvCX-SA4NHNNflU"
 
 # GIDs atualizados conforme a sua planilha real
 UNIDADES = {
-    "C-CHP": "1201656811",  # GID atualizado de Chapecó extraído da imagem
+    "C-CHP": "1201656811",  # Chapecó
     "C-CTBA": "145843404",   # Curitiba
     "S-SJ": "1712391604",    # São José
     "D-MG": "1071212860",    # Minas Gerais
-    "D-MS": "2059345229",    # Mato Grosso do Sul (se for diferente, coloque o gid da URL de D-MS)
-    "D-SP": "0"              # São Paulo
+    "D-MS": "1260438020",    # Mato Grosso do Sul
+    "D-SP": "1323067532"     # São Paulo
 }
 
 @st.cache_data(ttl=15)
